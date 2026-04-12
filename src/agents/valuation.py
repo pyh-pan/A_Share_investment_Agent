@@ -11,7 +11,7 @@ logger = setup_logger('valuation_agent')
 @agent_endpoint("valuation", "估值分析师，使用DCF和所有者收益法评估公司内在价值")
 def valuation_agent(state: AgentState):
     """Responsible for valuation analysis"""
-    show_workflow_status("Valuation Agent")
+    show_workflow_status("估值分析师")
     show_reasoning = state["metadata"]["show_reasoning"]
     data = state["data"]
     metrics = data["financial_metrics"][0]
@@ -25,7 +25,7 @@ def valuation_agent(state: AgentState):
             "confidence": "0%",
             "status": "unavailable",
             "reasoning": {
-                "error": "Market cap unavailable; valuation skipped."
+                "error": "市值数据不可用，跳过估值分析。"
             }
         }
         message = HumanMessage(
@@ -33,9 +33,9 @@ def valuation_agent(state: AgentState):
             name="valuation_agent",
         )
         if show_reasoning:
-            show_agent_reasoning(message_content, "Valuation Analysis Agent")
+            show_agent_reasoning(message_content, "估值分析")
             state["metadata"]["agent_reasoning"] = message_content
-        show_workflow_status("Valuation Agent", "completed")
+        show_workflow_status("估值分析师", "completed")
         return {
             "messages": [message],
             "data": {
@@ -87,12 +87,12 @@ def valuation_agent(state: AgentState):
 
     reasoning["dcf_analysis"] = {
         "signal": "bullish" if dcf_gap > 0.10 else "bearish" if dcf_gap < -0.20 else "neutral",
-        "details": f"Intrinsic Value: ${dcf_value:,.2f}, Market Cap: ${market_cap:,.2f}, Gap: {dcf_gap:.1%}"
+        "details": f"内在价值: ¥{dcf_value:,.2f}, 市值: ¥{market_cap:,.2f}, 差距: {dcf_gap:.1%}"
     }
 
     reasoning["owner_earnings_analysis"] = {
         "signal": "bullish" if owner_earnings_gap > 0.10 else "bearish" if owner_earnings_gap < -0.20 else "neutral",
-        "details": f"Owner Earnings Value: ${owner_earnings_value:,.2f}, Market Cap: ${market_cap:,.2f}, Gap: {owner_earnings_gap:.1%}"
+        "details": f"所有者收益估值: ¥{owner_earnings_value:,.2f}, 市值: ¥{market_cap:,.2f}, 差距: {owner_earnings_gap:.1%}"
     }
 
     message_content = {
@@ -107,11 +107,11 @@ def valuation_agent(state: AgentState):
     )
 
     if show_reasoning:
-        show_agent_reasoning(message_content, "Valuation Analysis Agent")
+        show_agent_reasoning(message_content, "估值分析")
         # 保存推理信息到metadata供API使用
         state["metadata"]["agent_reasoning"] = message_content
 
-    show_workflow_status("Valuation Agent", "completed")
+    show_workflow_status("估值分析师", "completed")
     # logger.info(
     # f"--- DEBUG: valuation_agent RETURN messages: {[msg.name for msg in [message]]} ---")
     return {

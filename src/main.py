@@ -62,13 +62,13 @@ logger = setup_logger('main_workflow')
 
 
 def run_hedge_fund(run_id: str, ticker: str, start_date: str, end_date: str, portfolio: dict, show_reasoning: bool = False, num_of_news: int = 5, show_summary: bool = False):
-    print(f"--- Starting Workflow Run ID: {run_id} ---")
+    print(f"--- 开始工作流运行 ID: {run_id} ---")
     try:
         from backend.state import api_state
         api_state.current_run_id = run_id
-        print(f"--- API State updated with Run ID: {run_id} ---")
+        print(f"--- API 状态已更新，运行 ID: {run_id} ---")
     except Exception as e:
-        print(f"Note: Could not update API state: {str(e)}")
+        print(f"注意: 无法更新 API 状态: {str(e)}")
 
     initial_state = {
         "messages": [],  # 初始消息为空
@@ -90,7 +90,7 @@ def run_hedge_fund(run_id: str, ticker: str, start_date: str, end_date: str, por
         from backend.utils.context_managers import workflow_run
         with workflow_run(run_id):
             final_state = app.invoke(initial_state)
-            print(f"--- Finished Workflow Run ID: {run_id} ---")
+            print(f"--- 工作流运行完成 ID: {run_id} ---")
 
             if HAS_SUMMARY_REPORT and show_summary:
                 store_final_state(final_state)
@@ -101,7 +101,7 @@ def run_hedge_fund(run_id: str, ticker: str, start_date: str, end_date: str, por
                 print_structured_output(final_state)
     except ImportError:
         final_state = app.invoke(initial_state)
-        print(f"--- Finished Workflow Run ID: {run_id} ---")
+        print(f"--- 工作流运行完成 ID: {run_id} ---")
 
         if HAS_SUMMARY_REPORT and show_summary:
             store_final_state(final_state)
@@ -166,8 +166,10 @@ workflow.add_edge("risk_management_agent", "macro_analyst_agent")
 # macro_analyst_agent (end of main analysis path) and macro_news_agent (parallel news path)
 # both feed into portfolio_management_agent.
 # LangGraph will wait for both parent nodes to complete before running portfolio_management_agent.
+workflow.add_edge("macro_news_agent", "researcher_bull_agent")
+workflow.add_edge("macro_news_agent", "researcher_bear_agent")
+
 workflow.add_edge("macro_analyst_agent", "portfolio_management_agent")
-workflow.add_edge("macro_news_agent", "portfolio_management_agent")
 
 # Final node
 workflow.add_edge("portfolio_management_agent", END)
@@ -178,7 +180,7 @@ app = workflow.compile()
 
 
 def run_fastapi():
-    print("--- Starting FastAPI server in background (port 8000) ---")
+    print("--- 正在后台启动 FastAPI 服务器 (端口 8000) ---")
     uvicorn.run(fastapi_app, host="0.0.0.0", port=8000, log_config=None)
 
 
@@ -234,5 +236,5 @@ if __name__ == "__main__":
         num_of_news=args.num_of_news,
         show_summary=args.summary
     )
-    print("\nFinal Result:")
+    print("\n最终结果:")
     print(result)

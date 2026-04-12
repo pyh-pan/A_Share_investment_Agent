@@ -5,7 +5,7 @@ from src.utils.logging_config import setup_logger
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
 import json
 from datetime import datetime, timedelta
-from src.tools.openrouter_config import get_chat_completion
+from src.tools.openrouter_config import get_chat_completion, get_chat_completion_cached
 
 # 设置日志记录
 logger = setup_logger('macro_analyst_agent')
@@ -14,7 +14,7 @@ logger = setup_logger('macro_analyst_agent')
 @agent_endpoint("macro_analyst", "宏观分析师，分析宏观经济环境对目标股票的影响")
 def macro_analyst_agent(state: AgentState):
     """Responsible for macro analysis"""
-    show_workflow_status("Macro Analyst")
+    show_workflow_status("宏观分析师")
     show_reasoning = state["metadata"]["show_reasoning"]
     data = state["data"]
     symbol = data["ticker"]
@@ -61,7 +61,7 @@ def macro_analyst_agent(state: AgentState):
 
     # 如果需要显示推理过程
     if show_reasoning:
-        show_agent_reasoning(message_content, "Macro Analysis Agent")
+        show_agent_reasoning(message_content, "宏观分析")
         # 保存推理信息到metadata供API使用
         state["metadata"]["agent_reasoning"] = message_content
 
@@ -71,12 +71,12 @@ def macro_analyst_agent(state: AgentState):
         name="macro_analyst_agent",
     )
 
-    show_workflow_status("Macro Analyst", "completed")
+    show_workflow_status("宏观分析师", "completed")
     # logger.info(f"--- DEBUG: macro_analyst_agent COMPLETED ---")
     # logger.info(
     # f"--- DEBUG: macro_analyst_agent RETURN messages: {[msg.name for msg in (state['messages'] + [message])]} ---")
     return {
-        "messages": state["messages"] + [message],
+        "messages": [message],
         "data": {
             **data,
             "macro_analysis": message_content
@@ -160,8 +160,8 @@ def get_macro_news_analysis(news_list: list) -> dict:
         f"来源：{news['source']}\n"
         f"时间：{news['publish_time']}\n"
         f"内容：{news['content']}"
-        # 使用前50条新闻进行分析，注意这里不是100，因为可能超过上下文限制，可根据自己的LLM来自行设置
-        for news in news_list[:50]
+        # 使用前20条新闻进行分析，避免超过 LLM 上下文限制导致超时
+        for news in news_list[:20]
     ])
 
     user_message = {
@@ -172,7 +172,7 @@ def get_macro_news_analysis(news_list: list) -> dict:
     try:
         # 获取LLM分析结果
         logger.info("正在调用LLM进行宏观分析...")
-        result = get_chat_completion([system_message, user_message])
+        result = get_chat_completion_cached([system_message, user_message])
         if result is None:
             logger.error("LLM分析失败，无法获取宏观分析结果")
             return {

@@ -15,7 +15,7 @@ import ast
 @agent_endpoint("risk_management", "风险管理专家，评估投资风险并给出风险调整后的交易建议")
 def risk_management_agent(state: AgentState):
     """Responsible for risk management"""
-    show_workflow_status("Risk Manager")
+    show_workflow_status("风险管理")
     show_reasoning = state["metadata"]["show_reasoning"]
     portfolio = state["data"]["portfolio"]
     data = state["data"]
@@ -35,18 +35,18 @@ def risk_management_agent(state: AgentState):
                 "stress_test_results": {},
             },
             "debate_analysis": {},
-            "reasoning": "Price data unavailable, defaulting to hold.",
+            "reasoning": "价格数据不可用，默认持有。",
         }
         message = HumanMessage(
             content=json.dumps(message_content),
             name="risk_management_agent",
         )
         if show_reasoning:
-            show_agent_reasoning(message_content, "Risk Management Agent")
+            show_agent_reasoning(message_content, "风险管理")
             state["metadata"]["agent_reasoning"] = message_content
-        show_workflow_status("Risk Manager", "completed")
+        show_workflow_status("风险管理", "completed")
         return {
-            "messages": state["messages"] + [message],
+            "messages": [message],
             "data": {
                 **data,
                 "risk_analysis": message_content
@@ -189,9 +189,7 @@ def risk_management_agent(state: AgentState):
             "debate_confidence": debate_confidence,
             "debate_signal": debate_signal
         },
-        "reasoning": f"Risk Score {risk_score}/10: Market Risk={market_risk_score}, "
-                     f"Volatility={volatility:.2%}, VaR={var_95:.2%}, "
-                     f"Max Drawdown={max_drawdown:.2%}, Debate Signal={debate_signal}"
+        "reasoning": f"风险评分 {risk_score}/10: 市场风险={market_risk_score}, 波动率={volatility:.2%}, VaR={var_95:.2%}, 最大回撤={max_drawdown:.2%}, 辩论信号={debate_signal}"
     }
 
     # Create the risk management message
@@ -201,13 +199,13 @@ def risk_management_agent(state: AgentState):
     )
 
     if show_reasoning:
-        show_agent_reasoning(message_content, "Risk Management Agent")
+        show_agent_reasoning(message_content, "风险管理")
         # 保存推理信息到metadata供API使用
         state["metadata"]["agent_reasoning"] = message_content
 
-    show_workflow_status("Risk Manager", "completed")
+    show_workflow_status("风险管理", "completed")
     return {
-        "messages": state["messages"] + [message],
+        "messages": [message],
         "data": {
             **data,
             "risk_analysis": message_content

@@ -15,7 +15,7 @@ logger = setup_logger('market_data_agent')
 @agent_endpoint("market_data", "市场数据收集，负责获取股价历史、财务指标和市场信息")
 def market_data_agent(state: AgentState):
     """Responsible for gathering and preprocessing market data"""
-    show_workflow_status("Market Data Agent")
+    show_workflow_status("市场数据")
     show_reasoning = state["metadata"]["show_reasoning"]
 
     messages = state["messages"]
@@ -123,7 +123,7 @@ def market_data_agent(state: AgentState):
     }
 
     if show_reasoning:
-        show_agent_reasoning(market_data_summary, "Market Data Agent")
+        show_agent_reasoning(market_data_summary, "市场数据")
         state["metadata"]["agent_reasoning"] = market_data_summary
 
     return {

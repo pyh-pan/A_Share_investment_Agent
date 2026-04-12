@@ -8,7 +8,7 @@ import ast
 @agent_endpoint("researcher_bull", "多方研究员，从看多角度分析市场数据并提出投资论点")
 def researcher_bull_agent(state: AgentState):
     """Analyzes signals from a bullish perspective and generates optimistic investment thesis."""
-    show_workflow_status("Bullish Researcher")
+    show_workflow_status("看多研究员")
     show_reasoning = state["metadata"]["show_reasoning"]
 
     # Fetch messages from analysts
@@ -39,45 +39,45 @@ def researcher_bull_agent(state: AgentState):
     # Technical Analysis
     if technical_signals["signal"] == "bullish":
         bullish_points.append(
-            f"Technical indicators show bullish momentum with {technical_signals['confidence']} confidence")
+            f"技术指标显示看多动能，置信度 {technical_signals['confidence']}")
         confidence_scores.append(
             float(str(technical_signals["confidence"]).replace("%", "")) / 100)
     else:
         bullish_points.append(
-            "Technical indicators may be conservative, presenting buying opportunities")
+            "技术指标可能偏保守，存在买入机会")
         confidence_scores.append(0.3)
 
     # Fundamental Analysis
     if fundamental_signals["signal"] == "bullish":
         bullish_points.append(
-            f"Strong fundamentals with {fundamental_signals['confidence']} confidence")
+            f"基本面强劲，置信度 {fundamental_signals['confidence']}")
         confidence_scores.append(
             float(str(fundamental_signals["confidence"]).replace("%", "")) / 100)
     else:
         bullish_points.append(
-            "Company fundamentals show potential for improvement")
+            "公司基本面具有改善潜力")
         confidence_scores.append(0.3)
 
     # Sentiment Analysis
     if sentiment_signals["signal"] == "bullish":
         bullish_points.append(
-            f"Positive market sentiment with {sentiment_signals['confidence']} confidence")
+            f"市场情绪积极，置信度 {sentiment_signals['confidence']}")
         confidence_scores.append(
             float(str(sentiment_signals["confidence"]).replace("%", "")) / 100)
     else:
         bullish_points.append(
-            "Market sentiment may be overly pessimistic, creating value opportunities")
+            "市场情绪可能过度悲观，创造价值机会")
         confidence_scores.append(0.3)
 
     # Valuation Analysis
     if valuation_signals["signal"] == "bullish":
         bullish_points.append(
-            f"Stock appears undervalued with {valuation_signals['confidence']} confidence")
+            f"股票被低估，置信度 {valuation_signals['confidence']}")
         confidence_scores.append(
             float(str(valuation_signals["confidence"]).replace("%", "")) / 100)
     else:
         bullish_points.append(
-            "Current valuation may not fully reflect growth potential")
+            "当前估值可能未充分反映增长潜力")
         confidence_scores.append(0.3)
 
     # Calculate overall bullish confidence
@@ -87,7 +87,7 @@ def researcher_bull_agent(state: AgentState):
         "perspective": "bullish",
         "confidence": avg_confidence,
         "thesis_points": bullish_points,
-        "reasoning": "Bullish thesis based on comprehensive analysis of technical, fundamental, sentiment, and valuation factors"
+        "reasoning": "基于技术面、基本面、情绪面和估值的综合分析，看多观点成立"
     }
 
     message = HumanMessage(
@@ -96,13 +96,13 @@ def researcher_bull_agent(state: AgentState):
     )
 
     if show_reasoning:
-        show_agent_reasoning(message_content, "Bullish Researcher")
+        show_agent_reasoning(message_content, "看多研究员")
         # 保存推理信息到metadata供API使用
         state["metadata"]["agent_reasoning"] = message_content
 
-    show_workflow_status("Bullish Researcher", "completed")
+    show_workflow_status("看多研究员", "completed")
     return {
-        "messages": state["messages"] + [message],
+        "messages": [message],
         "data": state["data"],
         "metadata": state["metadata"],
     }

@@ -13,7 +13,7 @@ logger = setup_logger('sentiment_agent')
 @agent_endpoint("sentiment", "情感分析师，分析市场新闻和社交媒体情绪")
 def sentiment_agent(state: AgentState):
     """Responsible for sentiment analysis"""
-    show_workflow_status("Sentiment Analyst")
+    show_workflow_status("情绪分析师")
     show_reasoning = state["metadata"]["show_reasoning"]
     data = state["data"]
     symbol = data["ticker"]
@@ -51,7 +51,7 @@ def sentiment_agent(state: AgentState):
         message_content = {
             "signal": signal,
             "confidence": confidence,
-            "reasoning": "No usable recent news articles were available for sentiment analysis.",
+            "reasoning": "没有可用的近期新闻用于情绪分析。",
             "news_count": 0,
             "status": "unavailable",
         }
@@ -73,14 +73,14 @@ def sentiment_agent(state: AgentState):
         message_content = {
             "signal": signal,
             "confidence": confidence,
-            "reasoning": f"Based on {len(recent_news)} recent news articles, sentiment score: {sentiment_score:.2f}",
+            "reasoning": f"基于 {len(recent_news)} 篇近期新闻，情绪评分: {sentiment_score:.2f}",
             "news_count": len(recent_news),
             "status": "ok",
         }
 
     # 如果需要显示推理过程
     if show_reasoning:
-        show_agent_reasoning(message_content, "Sentiment Analysis Agent")
+        show_agent_reasoning(message_content, "情绪分析")
         # 保存推理信息到metadata供API使用
         state["metadata"]["agent_reasoning"] = message_content
 
@@ -90,7 +90,7 @@ def sentiment_agent(state: AgentState):
         name="sentiment_agent",
     )
 
-    show_workflow_status("Sentiment Analyst", "completed")
+    show_workflow_status("情绪分析师", "completed")
     # logger.info(
     # f"--- DEBUG: sentiment_agent RETURN messages: {[msg.name for msg in [message]]} ---")
     return {

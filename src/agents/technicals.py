@@ -29,7 +29,7 @@ def technical_analyst_agent(state: AgentState):
     5. Statistical Arbitrage Signals
     """
     logger.info("\n--- DEBUG: technical_analyst_agent START ---")
-    show_workflow_status("Technical Analyst")
+    show_workflow_status("技术分析师")
     show_reasoning = state["metadata"]["show_reasoning"]
     data = state["data"]
     prices = data["prices"]
@@ -41,8 +41,8 @@ def technical_analyst_agent(state: AgentState):
         analysis_report = {
             "signal": "neutral",
             "confidence": "0%",
-            "status": "insufficient_price_data",
-            "reason": f"Need at least {minimum_rows} rows of price data, got {len(prices_df)}.",
+            "status": "价格数据不足",
+            "reason": f"需要至少 {minimum_rows} 条价格数据，当前仅有 {len(prices_df)} 条。",
             "strategy_signals": {},
         }
         message = HumanMessage(
@@ -50,9 +50,9 @@ def technical_analyst_agent(state: AgentState):
             name="technical_analyst_agent",
         )
         if show_reasoning:
-            show_agent_reasoning(analysis_report, "Technical Analyst")
+            show_agent_reasoning(analysis_report, "技术分析师")
             state["metadata"]["agent_reasoning"] = analysis_report
-        show_workflow_status("Technical Analyst", "completed")
+        show_workflow_status("技术分析师", "completed")
         return {
             "messages": [message],
             "data": data,
@@ -128,19 +128,19 @@ def technical_analyst_agent(state: AgentState):
     reasoning = {
         "MACD": {
             "signal": signals[0],
-            "details": f"MACD Line crossed {'above' if signals[0] == 'bullish' else 'below' if signals[0] == 'bearish' else 'neither above nor below'} Signal Line"
+            "details": f"MACD线{'上穿' if signals[0] == 'bullish' else '下穿' if signals[0] == 'bearish' else '未穿越'}信号线"
         },
         "RSI": {
             "signal": signals[1],
-            "details": f"RSI is {rsi.iloc[-1]:.2f} ({'oversold' if signals[1] == 'bullish' else 'overbought' if signals[1] == 'bearish' else 'neutral'})"
+            "details": f"RSI 为 {rsi.iloc[-1]:.2f} ({'超卖' if signals[1] == 'bullish' else '超买' if signals[1] == 'bearish' else '中性'})"
         },
         "Bollinger": {
             "signal": signals[2],
-            "details": f"Price is {'below lower band' if signals[2] == 'bullish' else 'above upper band' if signals[2] == 'bearish' else 'within bands'}"
+            "details": f"价格{'低于下轨' if signals[2] == 'bullish' else '高于上轨' if signals[2] == 'bearish' else '在布林带内'}"
         },
         "OBV": {
             "signal": signals[3],
-            "details": f"OBV slope is {obv_slope:.2f} ({signals[3]})"
+            "details": f"OBV 斜率为 {obv_slope:.2f} ({'正向' if signals[3] == 'bullish' else '负向' if signals[3] == 'bearish' else '持平'})"
         }
     }
 
@@ -243,11 +243,11 @@ def technical_analyst_agent(state: AgentState):
     )
 
     if show_reasoning:
-        show_agent_reasoning(analysis_report, "Technical Analyst")
+        show_agent_reasoning(analysis_report, "技术分析师")
         # 保存推理信息到state的metadata供API使用
         state["metadata"]["agent_reasoning"] = analysis_report
 
-    show_workflow_status("Technical Analyst", "completed")
+    show_workflow_status("技术分析师", "completed")
 
     # 添加调试信息，打印将要返回的消息名称
     # logger.info(

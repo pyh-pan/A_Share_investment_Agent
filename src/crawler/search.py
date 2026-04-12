@@ -484,3 +484,275 @@ def google_search_sync(
     同步版本的 Google 搜索函数
     """
     return asyncio.run(google_search(query, options))
+
+
+# ========== Bing 搜索 ==========
+
+async def bing_search(
+    query: str,
+    options: Optional[SearchOptions] = None,
+) -> SearchResponse:
+    """通过 Playwright 执行 Bing 搜索（国内可用）"""
+    if options is None:
+        options = SearchOptions()
+
+    limit = options.limit or 10
+    timeout = options.timeout or 30000
+
+    logger.info(f"Bing 搜索: {query}")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+        )
+        try:
+            context = await browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+            )
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
+            page = await context.new_page()
+
+            # 使用 www.bing.com（cn.bing.com 会重定向）
+            from urllib.parse import quote
+            encoded_query = quote(query)
+            await page.goto(f"https://www.bing.com/search?q={encoded_query}&ensearch=0&setlang=zh-Hans&mkt=zh-CN", timeout=timeout)
+            await page.wait_for_load_state("load", timeout=timeout)
+
+            # 等待搜索结果加载 —— 尝试多种选择器
+            result_loaded = False
+            for selector in ["li.b_algo", "#b_results li", ".b_algo", "#b_content .b_ans"]:
+                try:
+                    await page.wait_for_selector(selector, timeout=8000)
+                    result_loaded = True
+                    logger.info(f"Bing: 通过 {selector} 找到结果容器")
+                    break
+                except:
+                    continue
+
+            if not result_loaded:
+                # 最后的等待尝试 — 给页面更多渲染时间
+                await asyncio.sleep(3)
+                logger.warning("Bing: 未通过选择器找到结果，尝试直接提取")
+
+            results = await page.evaluate(f"""
+                () => {{
+                    const results = [];
+                    const maxResults = {limit};
+                    const seenUrls = new Set();
+
+                    // 策略1：标准 Bing 搜索结果 li.b_algo
+                    let items = document.querySelectorAll('li.b_algo, .b_algo');
+
+                    // 策略2：如果策略1无结果，尝试 #b_results 下所有 li
+                    if (items.length === 0) {{
+                        items = document.querySelectorAll('#b_results > li');
+                    }}
+
+                    // 策略3：通用 h2 > a 模式
+                    if (items.length === 0) {{
+                        const allLinks = document.querySelectorAll('h2 a[href^="http"]');
+                        for (const a of allLinks) {{
+                            if (results.length >= maxResults) break;
+                            const title = (a.textContent || '').trim();
+                            const link = a.href || '';
+                            if (!title || !link || seenUrls.has(link)) continue;
+                            // 尝试从父元素获取摘要
+                            let snippet = '';
+                            const parent = a.closest('li') || a.closest('div');
+                            if (parent) {{
+                                const pEl = parent.querySelector('p');
+                                if (pEl) snippet = (pEl.textContent || '').trim();
+                            }}
+                            results.push({{ title, link, snippet }});
+                            seenUrls.add(link);
+                        }}
+                        return results;
+                    }}
+
+                    for (const item of items) {{
+                        if (results.length >= maxResults) break;
+
+                        const titleEl = item.querySelector('h2 a') || item.querySelector('a');
+                        if (!titleEl) continue;
+
+                        const title = (titleEl.textContent || '').trim();
+                        const link = titleEl.href || '';
+
+                        if (!title || !link || !link.startsWith('http') || seenUrls.has(link)) continue;
+
+                        let snippet = '';
+                        const capEl = item.querySelector('.b_caption p') || item.querySelector('p');
+                        if (capEl) snippet = (capEl.textContent || '').trim();
+
+                        results.push({{ title, link, snippet }});
+                        seenUrls.add(link);
+                    }}
+                    return results;
+                }}
+            """)
+
+            logger.info(f"Bing 搜索获取到 {len(results)} 条结果")
+            await context.close()
+            await browser.close()
+
+            return SearchResponse(
+                query=query,
+                results=[SearchResult(title=r['title'], link=r['link'], snippet=r['snippet']) for r in results]
+            )
+
+        except Exception as e:
+            logger.error(f"Bing 搜索出错: {e}")
+            try:
+                await browser.close()
+            except:
+                pass
+            return SearchResponse(query=query, results=[])
+
+
+def bing_search_sync(query: str, options: Optional[SearchOptions] = None) -> SearchResponse:
+    """同步版本的 Bing 搜索"""
+    return asyncio.run(bing_search(query, options))
+
+
+# ========== 百度搜索 ==========
+
+async def baidu_search(
+    query: str,
+    options: Optional[SearchOptions] = None,
+) -> SearchResponse:
+    """通过 Playwright 执行百度新闻搜索（国内可用，绕过验证码）"""
+    if options is None:
+        options = SearchOptions()
+
+    limit = options.limit or 10
+    timeout = options.timeout or 30000
+
+    logger.info(f"百度新闻搜索: {query}")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+        )
+        try:
+            context = await browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+            )
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
+            page = await context.new_page()
+
+            # 百度新闻搜索入口
+            search_url = f"https://www.baidu.com/s?wd={query}&tn=news&cl=2&rn=20"
+            await page.goto(search_url, timeout=timeout)
+            await page.wait_for_load_state("domcontentloaded", timeout=timeout)
+
+            # 检查是否触发验证码
+            current_url = page.url
+            if "captcha" in current_url or "verify" in current_url or "wappass" in current_url:
+                logger.warning("百度触发验证码，尝试主搜索入口...")
+                # 回退到主搜索页面手动输入
+                await page.goto("https://www.baidu.com", timeout=timeout)
+                await page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                search_input = await page.wait_for_selector("#kw", timeout=5000)
+                if search_input:
+                    await search_input.fill(query)
+                    await page.keyboard.press("Enter")
+                    await page.wait_for_load_state("domcontentloaded", timeout=timeout)
+
+                    # 点击"资讯"tab 切换到新闻
+                    try:
+                        news_tab = await page.wait_for_selector('a:has-text("资讯")', timeout=5000)
+                        if news_tab:
+                            await news_tab.click()
+                            await page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                    except:
+                        logger.warning("百度：未找到资讯 tab")
+
+            # 等待结果加载
+            try:
+                await page.wait_for_selector('#content_left, .result-op, .c-container, div[tpl]', timeout=10000)
+            except:
+                logger.warning("百度：未找到搜索结果容器")
+
+            results = await page.evaluate(f"""
+                () => {{
+                    const results = [];
+                    const maxResults = {limit};
+                    const seenUrls = new Set();
+                    const filterWords = ['招聘', '求职', '广告', '配资', '开户'];
+
+                    // 百度新闻/资讯搜索结果选择器
+                    const containers = document.querySelectorAll(
+                        '.result-op, .c-container, div[tpl], .result'
+                    );
+
+                    for (const item of containers) {{
+                        if (results.length >= maxResults) break;
+
+                        // 提取标题和链接
+                        const titleEl = item.querySelector('h3 a') || item.querySelector('a.news-title-font_1xS-F') || item.querySelector('a[href]');
+                        if (!titleEl) continue;
+
+                        const title = (titleEl.textContent || '').trim();
+                        const link = titleEl.href || '';
+
+                        if (!title || title.length < 8 || !link || !link.startsWith('http') || seenUrls.has(link)) continue;
+
+                        // 过滤无关内容
+                        if (filterWords.some(w => title.includes(w))) continue;
+                        // 过滤百科、知道等非新闻内容
+                        if (link.includes('baike.baidu.com') || link.includes('zhidao.baidu.com')) continue;
+
+                        // 提取摘要
+                        let snippet = '';
+                        const summaryEl = item.querySelector('.c-summary, .c-abstract, .c-font-normal, .c-span-last');
+                        if (summaryEl) {{
+                            snippet = (summaryEl.textContent || '').trim();
+                        }}
+
+                        // 提取来源和时间
+                        const authorEl = item.querySelector('.c-author, .c-color-gray, .c-color-gray2, .news-source');
+                        let sourceInfo = '';
+                        if (authorEl) {{
+                            sourceInfo = (authorEl.textContent || '').trim();
+                        }}
+
+                        results.push({{
+                            title,
+                            link,
+                            snippet: snippet || sourceInfo || title
+                        }});
+                        seenUrls.add(link);
+                    }}
+                    return results;
+                }}
+            """)
+
+            logger.info(f"百度新闻搜索获取到 {len(results)} 条结果")
+            await context.close()
+            await browser.close()
+
+            return SearchResponse(
+                query=query,
+                results=[SearchResult(title=r['title'], link=r['link'], snippet=r['snippet']) for r in results]
+            )
+
+        except Exception as e:
+            logger.error(f"百度新闻搜索出错: {e}")
+            try:
+                await browser.close()
+            except:
+                pass
+            return SearchResponse(query=query, results=[])
+
+
+def baidu_search_sync(query: str, options: Optional[SearchOptions] = None) -> SearchResponse:
+    """同步版本的百度新闻搜索"""
+    return asyncio.run(baidu_search(query, options))

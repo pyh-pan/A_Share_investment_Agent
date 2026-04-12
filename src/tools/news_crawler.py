@@ -10,10 +10,12 @@ from src.tools.openrouter_config import get_chat_completion, logger as api_logge
 
 # 导入新的搜索模块
 try:
-    from src.crawler.search import google_search_sync, SearchOptions
+    from src.crawler.search import google_search_sync, bing_search_sync, baidu_search_sync, SearchOptions
 except ImportError:
     print("警告: 无法导入新的搜索模块，将回退到 akshare")
     google_search_sync = None
+    bing_search_sync = None
+    baidu_search_sync = None
     SearchOptions = None
 
 # 保留 akshare 作为备用
@@ -148,8 +150,303 @@ def convert_search_results_to_news_format(search_results, symbol: str) -> list:
     return news_list
 
 
+def _fetch_news_from_eastmoney(symbol: str, max_news: int = 100) -> list:
+    """直接从东方财富搜索API获取新闻（修复akshare的HTTP/HTTPS问题）"""
+    import requests as req
+    import json as js
+    import re
+
+    url = "https://search-api-web.eastmoney.com/search/jsonp"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Referer": "https://so.eastmoney.com/",
+    }
+    cb = "jQuery3510875346244069884_1668256937995"
+    params = {
+        "cb": cb,
+        "param": js.dumps({
+            "uid": "",
+            "keyword": symbol,
+            "type": ["cmsArticleWebOld"],
+            "client": "web",
+            "clientType": "web",
+            "clientVersion": "curr",
+            "param": {
+                "cmsArticleWebOld": {
+                    "searchScope": "default",
+                    "sort": "default",
+                    "pageIndex": 1,
+                    "pageSize": max_news,
+                    "preTag": "<em>",
+                    "postTag": "</em>",
+                }
+            },
+        }, ensure_ascii=False),
+    }
+    try:
+        r = req.get(url, params=params, headers=headers, timeout=15)
+        r.raise_for_status()
+        text = r.text.strip()
+        if not text:
+            return []
+        json_str = text[len(cb) + 1 : -1]  # strip JSONP wrapper
+        data = js.loads(json_str)
+        articles = data.get("result", {}).get("cmsArticleWebOld", [])
+        news_list = []
+        for a in articles:
+            title = re.sub(r"</?em>", "", a.get("title", "")).strip()
+            content = re.sub(r"</?em>", "", a.get("content", "")).strip()
+            if not title:
+                continue
+            news_list.append({
+                "title": title,
+                "content": content or title,
+                "publish_time": a.get("date", ""),
+                "source": a.get("mediaName", "东方财富").strip(),
+                "url": a.get("url", "").strip(),
+                "keyword": symbol,
+            })
+        return news_list[:max_news]
+    except Exception as e:
+        print(f"东方财富搜索API获取新闻失败: {e}")
+        return []
+
+
+def _fetch_news_from_sina(symbol: str, max_news: int = 50) -> list:
+    """从新浪财经个股新闻页面获取新闻"""
+    import requests as req
+    import re
+
+    # 确定交易所前缀：6 开头为上交所(sh)，其他为深交所(sz)
+    prefix = "sh" if symbol.startswith("6") else "sz"
+    url = f"https://vip.stock.finance.sina.com.cn/corp/go.php/vCB_AllNewsStock/symbol/{prefix}{symbol}.phtml"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://finance.sina.com.cn/",
+    }
+
+    try:
+        r = req.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
+
+        if not r.text or len(r.text) < 500:
+            print(f"新浪个股新闻页面返回内容过少")
+            return []
+
+        soup = BeautifulSoup(r.text, 'html.parser')
+        news_list = []
+
+        # 新浪个股新闻页面的链接通常包含 "doc-" 模式
+        links = soup.select('a[href*="doc-"]')
+        if not links:
+            links = soup.select('.datalist a') or soup.select('ul.list01 a')
+
+        for link_tag in links:
+            if len(news_list) >= max_news:
+                break
+
+            title = link_tag.get_text(strip=True)
+            link = link_tag.get('href', '')
+
+            if not title or len(title) < 5:
+                continue
+            if not link:
+                continue
+            if link.startswith('//'):
+                link = 'https:' + link
+            elif not link.startswith('http'):
+                continue
+
+            # 过滤无关内容（广告、配资等）
+            if any(kw in title for kw in ['招聘', '求职', '广告', '登录', '注册', '配资平台', '配资推荐', '配资排行']):
+                continue
+
+            # 从 <a> 前面的文本节点提取时间
+            # 页面结构：时间文本 <a>标题</a> <br/>
+            publish_time = ""
+            prev = link_tag.previous_sibling
+            if prev and isinstance(prev, str):
+                time_match = re.search(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})', prev)
+                if time_match:
+                    publish_time = f"{time_match.group(1)}:00"
+
+            news_list.append({
+                "title": title,
+                "content": title,
+                "publish_time": publish_time,
+                "source": "新浪财经",
+                "url": link,
+                "keyword": symbol,
+            })
+
+        print(f"新浪财经个股新闻获取到 {len(news_list)} 条")
+        return news_list[:max_news]
+    except Exception as e:
+        print(f"新浪财经获取新闻失败: {e}")
+        return []
+
+
+def _fetch_news_from_10jqka(symbol: str, max_news: int = 50) -> list:
+    """从同花顺 F10 页面获取个股新闻"""
+    import requests as req
+    import re
+
+    url = f"https://basic.10jqka.com.cn/{symbol}/news.html"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://basic.10jqka.com.cn/",
+    }
+
+    try:
+        r = req.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
+        r.encoding = 'gbk'
+        text = r.text
+
+        if not text or len(text) < 500:
+            print("同花顺页面返回内容过少")
+            return []
+
+        # 新闻数据在 id="linkagedata" 的隐藏元素中，是一个 JSON 数组
+        match = re.search(r'id="linkagedata"[^>]*>\s*(\[.*?\])\s*<', text, re.DOTALL)
+        if not match:
+            print("同花顺页面未找到新闻数据")
+            return []
+
+        import json as js
+        raw_json = match.group(1)
+        articles = js.loads(raw_json)
+
+        news_list = []
+        for a in articles:
+            if len(news_list) >= max_news:
+                break
+
+            title = a.get("title", "").strip()
+            if not title or len(title) < 5:
+                continue
+
+            # 过滤广告和配资内容
+            if any(kw in title for kw in ['配资平台', '配资推荐', '配资排行', '招聘', '求职', '广告']):
+                continue
+
+            # ctime 是 Unix 时间戳，转换为标准格式
+            publish_time = ""
+            ctime = a.get("ctime")
+            if ctime:
+                try:
+                    publish_time = datetime.fromtimestamp(int(ctime)).strftime('%Y-%m-%d %H:%M:%S')
+                except (ValueError, OSError):
+                    pass
+
+            news_list.append({
+                "title": title,
+                "content": title,  # F10 页面只有标题，无正文摘要
+                "publish_time": publish_time,
+                "source": a.get("source", "同花顺").strip() or "同花顺",
+                "url": a.get("curl", "").replace("\\/", "/"),
+                "keyword": symbol,
+            })
+
+        print(f"同花顺个股新闻获取到 {len(news_list)} 条")
+        return news_list[:max_news]
+    except Exception as e:
+        print(f"同花顺获取新闻失败: {e}")
+        return []
+
+
+def _search_news_via_bing(symbol: str, max_news: int = 20, date: str = None) -> list:
+    """通过 Bing 搜索获取新闻（使用 Playwright 渲染）"""
+    if not bing_search_sync or not SearchOptions:
+        print("Bing Playwright 搜索不可用，跳过")
+        return []
+
+    query = f"{symbol} 股票 新闻 财经"
+    try:
+        options = SearchOptions(limit=max_news * 2, timeout=15000, locale="zh-CN")
+        response = bing_search_sync(query, options)
+        if not response or not response.results:
+            print("Bing Playwright 搜索无结果")
+            return []
+
+        news_list = convert_search_results_to_news_format(response.results, symbol)
+        print(f"Bing Playwright 搜索获取到 {len(news_list)} 条新闻")
+        return news_list[:max_news]
+    except Exception as e:
+        print(f"Bing Playwright 搜索失败: {e}")
+        return []
+
+
+def _search_news_via_baidu(symbol: str, max_news: int = 20, date: str = None) -> list:
+    """通过百度资讯搜索获取新闻（使用 Playwright 渲染）"""
+    if not baidu_search_sync or not SearchOptions:
+        print("百度 Playwright 搜索不可用，跳过")
+        return []
+
+    query = f"{symbol} 股票 新闻"
+    try:
+        options = SearchOptions(limit=max_news * 2, timeout=15000, locale="zh-CN")
+        response = baidu_search_sync(query, options)
+        if not response or not response.results:
+            print("百度 Playwright 搜索无结果")
+            return []
+
+        news_list = convert_search_results_to_news_format(response.results, symbol)
+        print(f"百度 Playwright 搜索获取到 {len(news_list)} 条新闻")
+        return news_list[:max_news]
+    except Exception as e:
+        print(f"百度 Playwright 搜索失败: {e}")
+        return []
+
+
+def merge_and_deduplicate(*news_lists) -> list:
+    """合并多个新闻列表并去重（精确匹配 + 相似度匹配）"""
+    import re as _re
+    seen_titles = set()
+    normalized_titles = []  # 去除标点后的标题，用于模糊匹配
+    combined = []
+    for news_list in news_lists:
+        if not news_list:
+            continue
+        for item in news_list:
+            title = item.get('title', '').strip()
+            if not title:
+                continue
+            # 精确匹配
+            if title in seen_titles:
+                continue
+            # 模糊匹配：去除标点和空格后比较子串
+            normalized = _re.sub(r'[^\w]', '', title)
+            if not normalized:
+                continue
+            is_dup = False
+            for existing in normalized_titles:
+                shorter = min(len(normalized), len(existing))
+                if shorter > 0 and (normalized in existing or existing in normalized):
+                    is_dup = True
+                    break
+            if is_dup:
+                continue
+            seen_titles.add(title)
+            normalized_titles.append(normalized)
+            combined.append(item)
+    # 按发布时间倒序排列
+    try:
+        combined.sort(key=lambda x: x.get('publish_time', ''), reverse=True)
+    except:
+        pass
+    return combined
+
+
 def get_stock_news_via_akshare(symbol: str, max_news: int = 10) -> list:
     """使用 akshare 获取股票新闻的原始方法"""
+    # 先尝试直接调用东方财富API（修复HTTPS问题）
+    direct_news = _fetch_news_from_eastmoney(symbol, max_news)
+    if direct_news:
+        print(f"通过东方财富搜索API成功获取到{len(direct_news)}条新闻")
+        return direct_news
+
     if ak is None:
         return []
 
@@ -288,94 +585,85 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
 
     print(f'开始获取{symbol}的新闻数据...')
 
-    # 计算需要获取的新闻数量
-    need_more_news = max_news - len(cached_news)
-    fetch_count = max(need_more_news, max_news)  # 至少获取请求的数量
+    # === 第一梯队：专业财经三源（东方财富 + 新浪 + 同花顺） ===
+    print("第一梯队：尝试东方财富 + 新浪财经 + 同花顺...")
+    eastmoney_news = _fetch_news_from_eastmoney(symbol, max_news)
+    sina_news = _fetch_news_from_sina(symbol, max_news)
+    ths_news = _fetch_news_from_10jqka(symbol, max_news)
+    new_news_list = merge_and_deduplicate(eastmoney_news, sina_news, ths_news)
+    fetch_method = "eastmoney+sina+10jqka"
 
-    # 优先尝试使用新的 Google 搜索方法
-    new_news_list = []
-    if google_search_sync and SearchOptions:
-        try:
-            print("使用 Google 搜索获取新闻...")
-
-            # 构建搜索查询
-            search_query = build_search_query(symbol, date)
-            print(f"搜索查询: {search_query}")
-
-            # 执行搜索
-            search_options = SearchOptions(
-                limit=fetch_count * 2,  # 获取更多结果以便过滤
-                timeout=10000,
-                locale="zh-CN"
-            )
-
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    google_search_sync, search_query, search_options)
-                search_response = future.result(timeout=12)
-
-            if search_response.results:
-                # 转换搜索结果为新闻格式
-                new_news_list = convert_search_results_to_news_format(
-                    search_response.results, symbol)
-
-                print(f"通过 Google 搜索成功获取到{len(new_news_list)}条新闻")
-            else:
-                print("Google 搜索未返回有效结果，尝试回退到 akshare")
-
-        except FuturesTimeoutError:
-            print("Google 搜索超时，回退到 akshare")
-        except Exception as e:
-            print(f"Google 搜索获取新闻时出错: {e}，回退到 akshare")
-
-    # 如果 Google 搜索失败，回退到 akshare
-    if not new_news_list:
-        print("使用 akshare 获取新闻...")
-        try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    get_stock_news_via_akshare, symbol, fetch_count)
-                new_news_list = future.result(timeout=12)
-        except FuturesTimeoutError:
-            print("akshare 获取新闻超时")
-            new_news_list = []
-
-    # 合并缓存和新获取的新闻，去重
-    if cached_news and new_news_list:
-        # 创建已有新闻的标题集合用于去重
-        existing_titles = {news['title'] for news in cached_news}
-
-        # 过滤掉重复的新闻
-        unique_new_news = [
-            news for news in new_news_list
-            if news['title'] not in existing_titles
-        ]
-
-        # 合并新闻列表
-        combined_news = cached_news + unique_new_news
-        print(
-            f"合并缓存新闻({len(cached_news)}条)和新获取新闻({len(unique_new_news)}条)，总计{len(combined_news)}条")
+    if len(new_news_list) >= max_news * 0.5:
+        print(f"第一梯队获取到 {len(new_news_list)} 条新闻，满足需求")
     else:
-        combined_news = new_news_list or cached_news
+        # === 第二梯队：搜索引擎补充（百度 + Bing + Google，均使用 Playwright） ===
+        print(f"第一梯队仅获取到 {len(new_news_list)} 条，尝试第二梯队...")
 
-    # 按发布时间排序（如果有发布时间信息）
-    try:
-        combined_news.sort(key=lambda x: x.get(
-            "publish_time", ""), reverse=True)
-    except:
-        pass  # 如果排序失败，保持原顺序
+        # 2a. 百度资讯搜索（Playwright 渲染）
+        baidu_news = _search_news_via_baidu(symbol, max_news, date)
+        if baidu_news:
+            new_news_list = merge_and_deduplicate(new_news_list, baidu_news)
+            fetch_method += "+baidu"
+            print(f"百度补充后共 {len(new_news_list)} 条新闻")
+
+        # 2b. Bing 搜索（Playwright 渲染）
+        bing_news = _search_news_via_bing(symbol, max_news, date)
+        if bing_news:
+            new_news_list = merge_and_deduplicate(new_news_list, bing_news)
+            fetch_method += "+bing"
+            print(f"Bing 补充后共 {len(new_news_list)} 条新闻")
+
+        # 2c. Google 搜索（可能被墙，保留但降级，超时缩短到 8 秒）
+        if len(new_news_list) < max_news * 0.3 and google_search_sync and SearchOptions:
+            try:
+                print("尝试 Google 搜索补充...")
+                search_query = build_search_query(symbol, date)
+                search_options = SearchOptions(
+                    limit=max_news * 2,
+                    timeout=8000,
+                    locale="zh-CN"
+                )
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        google_search_sync, search_query, search_options)
+                    search_response = future.result(timeout=10)
+                if search_response.results:
+                    google_news = convert_search_results_to_news_format(
+                        search_response.results, symbol)
+                    new_news_list = merge_and_deduplicate(new_news_list, google_news)
+                    fetch_method += "+google"
+                    print(f"Google 补充后共 {len(new_news_list)} 条新闻")
+            except (FuturesTimeoutError, Exception) as e:
+                print(f"Google 搜索失败（预期内）: {e}")
+
+        # === 第三梯队：akshare 兜底 ===
+        if not new_news_list:
+            print("前两梯队均无结果，使用 akshare 兜底...")
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        get_stock_news_via_akshare, symbol, max_news)
+                    new_news_list = future.result(timeout=12)
+                fetch_method = "akshare"
+            except FuturesTimeoutError:
+                print("akshare 获取新闻超时")
+                new_news_list = []
+
+    # 合并缓存和新获取的新闻
+    combined_news = merge_and_deduplicate(cached_news, new_news_list) if cached_news else new_news_list
+    if cached_news and new_news_list:
+        print(f"合并缓存({len(cached_news)}条)和新获取新闻，总计{len(combined_news)}条")
 
     # 只保留指定条数的新闻
     final_news_list = combined_news[:max_news]
 
-    # 保存到文件（只有当获取到新数据时才保存）
+    # 保存到文件
     if new_news_list or not cache_valid:
         try:
             save_data = {
                 "date": cache_date,
-                "method": "online_search" if new_news_list and google_search_sync else "akshare",
-                "query": build_search_query(symbol, date) if new_news_list and google_search_sync else None,
-                "news": combined_news,  # 保存所有新闻，不只是返回的部分
+                "method": fetch_method,
+                "news": combined_news,
                 "cached_count": len(cached_news),
                 "new_count": len(new_news_list),
                 "total_count": len(combined_news),
@@ -481,15 +769,15 @@ def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
         # 获取LLM分析结果
         result = get_chat_completion([system_message, user_message])
         if result is None:
-            print("Error: PI error occurred, LLM returned None")
+            print("错误: LLM 返回 None")
             return 0.0
 
         # 提取数字结果
         try:
             sentiment_score = float(result.strip())
         except ValueError as e:
-            print(f"Error parsing sentiment score: {e}")
-            print(f"Raw result: {result}")
+            print(f"情绪评分解析错误: {e}")
+            print(f"原始结果: {result}")
             return 0.0
 
         # 确保分数在-1到1之间
@@ -501,10 +789,10 @@ def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
             with open(cache_file, 'w', encoding='utf-8') as f:
                 json.dump(cache, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"Error writing cache: {e}")
+            print(f"写入缓存错误: {e}")
 
         return sentiment_score
 
     except Exception as e:
-        print(f"Error analyzing news sentiment: {e}")
+        print(f"新闻情绪分析错误: {e}")
         return 0.0  # 出错时返回中性分数

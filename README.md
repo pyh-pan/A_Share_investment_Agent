@@ -64,6 +64,17 @@
 
 ## 最新功能：
 
+### 2026.04.12 新闻系统全面升级 & 全中文化
+
+1.  **三级新闻源架构**：建立了分级优先的新闻获取体系
+    - **第一梯队**（快速 HTTP API）：东方财富 + 新浪财经 + 同花顺 — 速度快，质量高
+    - **第二梯队**（Playwright 浏览器渲染）：百度资讯 + Bing + Google — 第一梯队不足时补充
+    - **第三梯队**（兜底）：akshare — 前两级均失败时启用
+2.  **增强去重机制**：在精确标题匹配基础上，新增模糊去重（去除标点后子串匹配），有效消除不同来源的重复新闻
+3.  **同花顺新闻源**：新增同花顺 F10 个股新闻接口，从 `basic.10jqka.com.cn` 获取，支持 GBK 编码和 Unix 时间戳解析
+4.  **Playwright 搜索引擎集成**：百度资讯和 Bing 搜索通过 Playwright 渲染获取，支持反检测和多策略结果提取
+5.  **全中文交互**：所有 Agent 输出、工作流状态、分析报告、LLM 提示词统一为中文，包括最终投资决策的 reasoning 字段
+
 ### 2025.06.22 新闻搜索功能升级
 
 我们对新闻获取系统进行了重大升级，显著提升了新闻数据的质量和获取效率：
@@ -415,7 +426,8 @@ A_Share_investment_Agent/
 │   │   ├── __init__.py
 │   │   ├── debate_room.py
 │   │   ├── fundamentals.py
-│   │   ├── macro_analyst.py       # 宏观分析师Agent
+│   │   ├── macro_analyst.py       # 宏观分析师Agent（个股宏观分析）
+│   │   ├── macro_news_agent.py    # 宏观新闻Agent（大盘新闻摘要，沪深300）
 │   │   ├── market_data.py
 │   │   ├── portfolio_manager.py
 │   │   ├── researcher_bear.py
@@ -430,11 +442,13 @@ A_Share_investment_Agent/
 │   │   ├── sentiment_cache.json  # 情感分析结果缓存
 │   │   ├── macro_analysis_cache.json  # 宏观分析结果缓存
 │   │   └── stock_news/         # 股票新闻数据
+│   ├── crawler/                # Playwright 搜索引擎模块
+│   │   └── search.py           # Google/Bing/Baidu Playwright 搜索
 │   ├── tools/                  # 工具和功能模块 (LLM, 数据获取)
 │   │   ├── __init__.py
 │   │   ├── api.py
 │   │   ├── data_analyzer.py
-│   │   ├── news_crawler.py
+│   │   ├── news_crawler.py     # 三级新闻源架构（东方财富+新浪+同花顺 → 百度+Bing+Google → akshare）
 │   │   └── openrouter_config.py
 │   ├── utils/                  # 通用工具函数 (日志, LLM客户端, 序列化)
 │   │   ├── __init__.py

@@ -15,7 +15,7 @@ logger = setup_logger('fundamentals_agent')
 @agent_endpoint("fundamentals", "基本面分析师，分析公司财务指标、盈利能力和增长潜力")
 def fundamentals_agent(state: AgentState):
     """Responsible for fundamental analysis"""
-    show_workflow_status("Fundamentals Analyst")
+    show_workflow_status("基本面分析师")
     show_reasoning = state["metadata"]["show_reasoning"]
     data = state["data"]
     metrics = data["financial_metrics"][0]
@@ -44,14 +44,14 @@ def fundamentals_agent(state: AgentState):
     reasoning["profitability_signal"] = {
         "signal": signals[0],
         "details": (
-            f"ROE: {metrics.get('return_on_equity', 0):.2%}" if metrics.get(
-                "return_on_equity") is not None else "ROE: N/A"
+            f"ROE(净资产收益率): {metrics.get('return_on_equity', 0):.2%}" if metrics.get(
+                "return_on_equity") is not None else "ROE(净资产收益率): N/A"
         ) + ", " + (
-            f"Net Margin: {metrics.get('net_margin', 0):.2%}" if metrics.get(
-                "net_margin") is not None else "Net Margin: N/A"
+            f"净利率: {metrics.get('net_margin', 0):.2%}" if metrics.get(
+                "net_margin") is not None else "净利率: N/A"
         ) + ", " + (
-            f"Op Margin: {metrics.get('operating_margin', 0):.2%}" if metrics.get(
-                "operating_margin") is not None else "Op Margin: N/A"
+            f"营业利润率: {metrics.get('operating_margin', 0):.2%}" if metrics.get(
+                "operating_margin") is not None else "营业利润率: N/A"
         )
     }
 
@@ -75,11 +75,11 @@ def fundamentals_agent(state: AgentState):
     reasoning["growth_signal"] = {
         "signal": signals[1],
         "details": (
-            f"Revenue Growth: {metrics.get('revenue_growth', 0):.2%}" if metrics.get(
-                "revenue_growth") is not None else "Revenue Growth: N/A"
+            f"营收增长: {metrics.get('revenue_growth', 0):.2%}" if metrics.get(
+                "revenue_growth") is not None else "营收增长: N/A"
         ) + ", " + (
-            f"Earnings Growth: {metrics.get('earnings_growth', 0):.2%}" if metrics.get(
-                "earnings_growth") is not None else "Earnings Growth: N/A"
+            f"盈利增长: {metrics.get('earnings_growth', 0):.2%}" if metrics.get(
+                "earnings_growth") is not None else "盈利增长: N/A"
         )
     }
 
@@ -103,11 +103,11 @@ def fundamentals_agent(state: AgentState):
     reasoning["financial_health_signal"] = {
         "signal": signals[2],
         "details": (
-            f"Current Ratio: {metrics.get('current_ratio', 0):.2f}" if metrics.get(
-                "current_ratio") is not None else "Current Ratio: N/A"
+            f"流动比率: {metrics.get('current_ratio', 0):.2f}" if metrics.get(
+                "current_ratio") is not None else "流动比率: N/A"
         ) + ", " + (
-            f"D/E: {metrics.get('debt_to_equity', 0):.2f}" if metrics.get(
-                "debt_to_equity") is not None else "D/E: N/A"
+            f"资产负债率: {metrics.get('debt_to_equity', 0):.2f}" if metrics.get(
+                "debt_to_equity") is not None else "资产负债率: N/A"
         )
     }
 
@@ -131,11 +131,11 @@ def fundamentals_agent(state: AgentState):
     reasoning["price_ratios_signal"] = {
         "signal": signals[3],
         "details": (
-            f"P/E: {pe_ratio:.2f}" if pe_ratio else "P/E: N/A"
+            f"市盈率: {pe_ratio:.2f}" if pe_ratio else "市盈率: N/A"
         ) + ", " + (
-            f"P/B: {price_to_book:.2f}" if price_to_book else "P/B: N/A"
+            f"市净率: {price_to_book:.2f}" if price_to_book else "市净率: N/A"
         ) + ", " + (
-            f"P/S: {price_to_sales:.2f}" if price_to_sales else "P/S: N/A"
+            f"市销率: {price_to_sales:.2f}" if price_to_sales else "市销率: N/A"
         )
     }
 
@@ -168,11 +168,11 @@ def fundamentals_agent(state: AgentState):
 
     # Print the reasoning if the flag is set
     if show_reasoning:
-        show_agent_reasoning(message_content, "Fundamental Analysis Agent")
+        show_agent_reasoning(message_content, "基本面分析")
         # 保存推理信息到metadata供API使用
         state["metadata"]["agent_reasoning"] = message_content
 
-    show_workflow_status("Fundamentals Analyst", "completed")
+    show_workflow_status("基本面分析师", "completed")
     # logger.info(f"--- DEBUG: fundamentals_agent RETURN messages: {[msg.name for msg in [message]]} ---")
     return {
         "messages": [message],

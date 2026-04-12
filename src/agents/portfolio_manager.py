@@ -4,7 +4,7 @@ import json
 from src.utils.logging_config import setup_logger
 
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
-from src.tools.openrouter_config import get_chat_completion
+from src.tools.openrouter_config import get_chat_completion, get_chat_completion_cached
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
 
 # 初始化 logger
@@ -20,10 +20,10 @@ def get_latest_message_by_name(messages: list, name: str):
         if msg.name == name:
             return msg
     logger.warning(
-        f"Message from agent '{name}' not found in portfolio_management_agent.")
+        f"投资组合管理中未找到 '{name}' 的消息")
     # Return a dummy message object or raise an error, depending on desired handling
     # For now, returning a dummy message to avoid crashing, but content will be None.
-    return HumanMessage(content=json.dumps({"signal": "error", "details": f"Message from {name} not found"}), name=name)
+    return HumanMessage(content=json.dumps({"signal": "error", "details": f"未找到 {name} 的消息"}), name=name)
 
 
 @agent_endpoint("portfolio_management", "负责投资组合管理和最终交易决策")
@@ -50,7 +50,7 @@ def portfolio_management_agent(state: AgentState):
     # logger.info(
     # f"--- DEBUG: {agent_name} CLEANED messages for processing: {[msg.name for msg in cleaned_messages_for_processing]} ---")
 
-    show_workflow_status(f"{agent_name}: --- Executing Portfolio Manager ---")
+    show_workflow_status(f"{agent_name}: --- 正在执行投资组合管理 ---")
     show_reasoning_flag = state["metadata"]["show_reasoning"]
     portfolio = state["data"]["portfolio"]
 
@@ -89,85 +89,84 @@ def portfolio_management_agent(state: AgentState):
     macro_news_agent_message_obj = get_latest_message_by_name(
         cleaned_messages_for_processing, "macro_news_agent")
 
-    system_message_content = """You are a portfolio manager making final trading decisions.
-            Your job is to make a trading decision based on the team's analysis while strictly adhering
-            to risk management constraints.
+    system_message_content = """你是一位投资组合经理，负责做出最终的交易决策。
+你的工作是根据团队的分析做出交易决策，同时严格遵守风险管理约束。
 
-            RISK MANAGEMENT CONSTRAINTS:
-            - You MUST NOT exceed the max_position_size specified by the risk manager
-            - You MUST follow the trading_action (buy/sell/hold) recommended by risk management
-            - These are hard constraints that cannot be overridden by other signals
+风险管理约束：
+- 你必须不超过风险管理指定的最大持仓规模
+- 你必须遵循风险管理建议的交易操作（买入/卖出/持有）
+- 这些是硬性约束，不能被其他信号覆盖
 
-            When weighing the different signals for direction and timing:
-            1. Valuation Analysis (30% weight)
-            2. Fundamental Analysis (25% weight)
-            3. Technical Analysis (20% weight)
-            4. Macro Analysis (15% weight) - This encompasses TWO inputs:
-               a) General Macro Environment (from Macro Analyst Agent, tool-based)
-               b) Daily Market-Wide News Summary (from Macro News Agent)
-               Both provide context for external risks and opportunities.
-            5. Sentiment Analysis (10% weight)
+权衡不同信号的方向和时机时：
+1. 估值分析（30% 权重）
+2. 基本面分析（25% 权重）
+3. 技术分析（20% 权重）
+4. 宏观分析（15% 权重）—— 包含两个输入：
+   a) 常规宏观环境（来自宏观分析师，工具型）
+   b) 每日大盘新闻摘要（来自宏观新闻）
+   两者都为外部风险和机会提供背景。
+5. 情绪分析（10% 权重）
 
-            The decision process should be:
-            1. First check risk management constraints
-            2. Then evaluate valuation signal
-            3. Then evaluate fundamentals signal
-            4. Consider BOTH the General Macro Environment AND the Daily Market-Wide News Summary.
-            5. Use technical analysis for timing
-            6. Consider sentiment for final adjustment
+决策流程：
+1. 首先检查风险管理约束
+2. 然后评估估值信号
+3. 然后评估基本面信号
+4. 同时考虑常规宏观环境和每日大盘新闻摘要
+5. 使用技术分析确定时机
+6. 考虑情绪作为最终调整
 
-            Provide the following in your output JSON:
-            - "action": "buy" | "sell" | "hold",
-            - "quantity": <positive integer>
-            - "confidence": <float between 0 and 1>
-            - "agent_signals": <list of agent signals including agent name, signal (bullish | bearish | neutral), and their confidence>.
-              IMPORTANT: Your 'agent_signals' list MUST include entries for:
-                - "technical_analysis"
-                - "fundamental_analysis"
-                - "sentiment_analysis"
-                - "valuation_analysis"
-                - "risk_management"
-                - "selected_stock_macro_analysis" (representing the tool-based macro input from macro_analyst_agent)
-                - "market_wide_news_summary(沪深300指数)" (representing the daily news summary input from macro_news_agent - provide a brief signal like bullish/bearish/neutral for the news summary itself, or state if it was primarily factored into overall reasoning with confidence reflecting its impact)
-            - "reasoning": <concise explanation of the decision including how you weighted ALL signals, including both macro inputs>
+请在输出 JSON 中提供以下内容：
+- "action": "buy" | "sell" | "hold"
+- "quantity": <正整数>
+- "confidence": <0到1之间的浮点数>
+- "agent_signals": <代理信号列表，包含代理名称、信号（bullish | bearish | neutral）及其置信度>
+  重要：你的 'agent_signals' 列表必须包含以下条目：
+    - "technical_analysis"
+    - "fundamental_analysis"
+    - "sentiment_analysis"
+    - "valuation_analysis"
+    - "risk_management"
+    - "selected_stock_macro_analysis"（代表来自宏观分析师的工具型宏观输入）
+    - "market_wide_news_summary(沪深300指数)"（代表来自宏观新闻的每日新闻摘要输入）
+- "reasoning": <简明的决策解释，包括如何权衡所有信号，包括两个宏观输入>
 
-            Trading Rules:
-            - Never exceed risk management position limits
-            - Only buy if you have available cash
-            - Only sell if you have shares to sell
-            - Quantity must be ≤ current position for sells
-            - Quantity must be ≤ max_position_size from risk management"""
+交易规则：
+- 永远不要超过风险管理的持仓限制
+- 只有在有可用资金时才买入
+- 只有在持有股票时才卖出
+- 卖出数量必须 ≤ 当前持仓
+- 买入数量必须 ≤ 风险管理的最大持仓规模"""
     system_message = {
         "role": "system",
         "content": system_message_content
     }
 
-    user_message_content = f"""Based on the team's analysis below, make your trading decision.
+    user_message_content = f"""请根据以下团队分析结果做出交易决策。请使用中文进行推理分析。
 
-            Technical Analysis Signal: {technical_content}
-            Fundamental Analysis Signal: {fundamentals_content}
-            Sentiment Analysis Signal: {sentiment_content}
-            Valuation Analysis Signal: {valuation_content}
-            Risk Management Signal: {risk_content}
-            General Macro Analysis (from Macro Analyst Agent): {tool_based_macro_content}
-            Daily Market-Wide News Summary (from Macro News Agent):
+            技术分析信号: {technical_content}
+            基本面分析信号: {fundamentals_content}
+            情绪分析信号: {sentiment_content}
+            估值分析信号: {valuation_content}
+            风险管理信号: {risk_content}
+            宏观环境分析（来自宏观分析师）: {tool_based_macro_content}
+            每日大盘新闻摘要（来自宏观新闻）:
             {market_wide_news_summary_content}
 
-            Current Portfolio:
-            Cash: {portfolio['cash']:.2f}
-            Current Position: {portfolio['stock']} shares
+            当前投资组合:
+            现金: {portfolio['cash']:.2f}
+            当前持仓: {portfolio['stock']} 股
 
-            Output JSON only. Ensure 'agent_signals' includes all required agents as per system prompt."""
+            请仅输出JSON格式，reasoning字段请使用中文。确保 'agent_signals' 包含系统提示中要求的所有代理。"""
     user_message = {
         "role": "user",
         "content": user_message_content
     }
 
     show_agent_reasoning(
-        agent_name, f"Preparing LLM. User msg includes: TA, FA, Sent, Val, Risk, GeneralMacro, MarketNews.")
+        agent_name, f"准备 LLM 调用，输入包含: 技术分析、基本面、情绪、估值、风险、宏观分析、市场新闻")
 
     llm_interaction_messages = [system_message, user_message]
-    llm_response_content = get_chat_completion(llm_interaction_messages)
+    llm_response_content = get_chat_completion_cached(llm_interaction_messages)
 
     current_metadata = state["metadata"]
     current_metadata["current_agent_name"] = agent_name
@@ -178,7 +177,7 @@ def portfolio_management_agent(state: AgentState):
 
     if llm_response_content is None:
         show_agent_reasoning(
-            agent_name, "LLM call failed. Using default conservative decision.")
+            agent_name, "LLM 调用失败，使用默认保守决策")
         # Ensure the dummy response matches the expected structure for agent_signals
         llm_response_content = json.dumps({
             "action": "hold",
@@ -200,7 +199,7 @@ def portfolio_management_agent(state: AgentState):
                 {"agent_name": "macro_news_agent",
                     "signal": "unavailable_or_llm_error", "confidence": 0.0}
             ],
-            "reasoning": "LLM API error. Defaulting to conservative hold based on risk management."
+            "reasoning": "LLM API 错误，基于风险管理默认保守持有。"
         })
 
     final_decision_message = HumanMessage(
@@ -210,7 +209,7 @@ def portfolio_management_agent(state: AgentState):
 
     if show_reasoning_flag:
         show_agent_reasoning(
-            agent_name, f"Final LLM decision JSON: {llm_response_content}")
+            agent_name, f"最终 LLM 决策 JSON: {llm_response_content}")
 
     agent_decision_details_value = {}
     try:
@@ -223,11 +222,11 @@ def portfolio_management_agent(state: AgentState):
         }
     except json.JSONDecodeError:
         agent_decision_details_value = {
-            "error": "Failed to parse LLM decision JSON from portfolio manager",
+            "error": "投资组合管理器 LLM 决策 JSON 解析失败",
             "raw_response_snippet": llm_response_content[:200] + "..."
         }
 
-    show_workflow_status(f"{agent_name}: --- Portfolio Manager Completed ---")
+    show_workflow_status(f"{agent_name}: --- 投资组合管理完成 ---")
 
     # The portfolio_management_agent is a terminal or near-terminal node in terms of new message generation for the main state.
     # It should return its own decision, and an updated state["messages"] that includes its decision.
@@ -238,7 +237,7 @@ def portfolio_management_agent(state: AgentState):
     # then the `cleaned_messages_for_processing` should become the new `state["messages"]` for this node's context.
     # However, for simplicity and robustness, let's assume its output `messages` should just be its own message added to the cleaned input it processed.
 
-    final_messages_output = cleaned_messages_for_processing + [final_decision_message]
+    final_messages_output = [final_decision_message]
     # Alternative if we want to be super strict about adding to the raw incoming state["messages"]:
     # final_messages_output = state["messages"] + [final_decision_message]
     # But this ^ is prone to the duplication we are trying to solve if not careful.

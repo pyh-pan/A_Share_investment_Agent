@@ -1,5 +1,7 @@
 import os
 import time
+import json
+import hashlib
 from google import genai
 from dotenv import load_dotenv
 from dataclasses import dataclass
@@ -127,3 +129,61 @@ def get_chat_completion(messages, model=None, max_retries=3, initial_retry_delay
     except Exception as e:
         logger.error(f"{ERROR_ICON} get_chat_completion 发生错误: {str(e)}")
         return None
+
+
+# === LLM 调用缓存 ===
+_LLM_CACHE_FILE = os.path.join("src", "data", "llm_cache.json")
+
+
+def get_chat_completion_cached(messages, cache_ttl=86400, **kwargs):
+    """带文件缓存的 LLM 调用，同一输入在 cache_ttl 秒内不重复调用
+
+    Args:
+        messages: 消息列表，OpenAI 格式
+        cache_ttl: 缓存有效期（秒），默认 86400（1天）
+        **kwargs: 传递给 get_chat_completion 的其他参数
+
+    Returns:
+        str: 模型回答内容或 None
+    """
+    os.makedirs(os.path.dirname(_LLM_CACHE_FILE), exist_ok=True)
+
+    # 生成缓存键（消息内容的 MD5 哈希）
+    msg_str = json.dumps(messages, ensure_ascii=False, sort_keys=True)
+    cache_key = hashlib.md5(msg_str.encode()).hexdigest()
+
+    # 读取缓存
+    if os.path.exists(_LLM_CACHE_FILE):
+        try:
+            with open(_LLM_CACHE_FILE, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+            if cache_key in cache:
+                entry = cache[cache_key]
+                if time.time() - entry.get('timestamp', 0) < cache_ttl:
+                    logger.info(f"{SUCCESS_ICON} LLM 缓存命中: {cache_key[:8]}...")
+                    return entry['result']
+                else:
+                    logger.info(f"LLM 缓存已过期: {cache_key[:8]}...")
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # 缓存未命中，调用 LLM
+    result = get_chat_completion(messages, **kwargs)
+
+    # 写入缓存（仅当 LLM 返回有效结果时）
+    if result is not None:
+        try:
+            cache = {}
+            if os.path.exists(_LLM_CACHE_FILE):
+                with open(_LLM_CACHE_FILE, 'r', encoding='utf-8') as f:
+                    cache = json.load(f)
+            cache[cache_key] = {
+                'result': result,
+                'timestamp': time.time(),
+            }
+            with open(_LLM_CACHE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"写入 LLM 缓存失败: {e}")
+
+    return result

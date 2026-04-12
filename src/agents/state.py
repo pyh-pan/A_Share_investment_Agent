@@ -29,9 +29,9 @@ def show_workflow_status(agent_name: str, status: str = "processing"):
         status: Status of the agent's work ("processing" or "completed")
     """
     if status == "processing":
-        logger.info(f"🔄 {agent_name} is analyzing...")
+        logger.info(f"🔄 {agent_name} 正在分析...")
     else:
-        logger.info(f"✅ {agent_name} analysis completed")
+        logger.info(f"✅ {agent_name} 分析完成")
 
 
 def show_agent_reasoning(output, agent_name):

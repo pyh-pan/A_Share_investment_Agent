@@ -1,6 +1,6 @@
 from langchain_core.messages import HumanMessage
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
-from src.tools.openrouter_config import get_chat_completion
+from src.tools.openrouter_config import get_chat_completion, get_chat_completion_cached
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
 import json
 import ast
@@ -13,7 +13,7 @@ logger = logging.getLogger('debate_room')
 @agent_endpoint("debate_room", "辩论室，分析多空双方观点，得出平衡的投资结论")
 def debate_room_agent(state: AgentState):
     """Facilitates debate between bull and bear researchers to reach a balanced conclusion."""
-    show_workflow_status("Debate Room")
+    show_workflow_status("辩论室")
     show_reasoning = state["metadata"]["show_reasoning"]
     logger.info("开始分析研究员观点并进行辩论...")
 
@@ -34,7 +34,7 @@ def debate_room_agent(state: AgentState):
         logger.error(
             "缺少必要的研究员数据: researcher_bull_agent 或 researcher_bear_agent")
         raise ValueError(
-            "Missing required researcher_bull_agent or researcher_bear_agent messages")
+            "缺少必要的看多研究员或看空研究员消息")
 
     # 处理研究员数据
     researcher_data = {}
@@ -60,7 +60,7 @@ def debate_room_agent(state: AgentState):
     if "researcher_bull_agent" not in researcher_data or "researcher_bear_agent" not in researcher_data:
         logger.error("无法解析必要的研究员数据")
         raise ValueError(
-            "Could not parse required researcher_bull_agent or researcher_bear_agent messages")
+            "无法解析必要的看多研究员或看空研究员消息")
 
     bull_thesis = researcher_data["researcher_bull_agent"]
     bear_thesis = researcher_data["researcher_bear_agent"]
@@ -73,11 +73,11 @@ def debate_room_agent(state: AgentState):
 
     # 分析辩论观点
     debate_summary = []
-    debate_summary.append("Bullish Arguments:")
+    debate_summary.append("看多论据:")
     for point in bull_thesis.get("thesis_points", []):
         debate_summary.append(f"+ {point}")
 
-    debate_summary.append("\nBearish Arguments:")
+    debate_summary.append("\n看空论据:")
     for point in bear_thesis.get("thesis_points", []):
         debate_summary.append(f"- {point}")
 
@@ -111,7 +111,7 @@ def debate_room_agent(state: AgentState):
     "reasoning": "你给出这个评分的简要理由"
 }
 
-务必确保你的回复是有效的 JSON 格式，且包含上述所有字段。回复必须使用英文，不要使用中文或其他语言。
+务必确保你的回复是有效的 JSON 格式，且包含上述所有字段。回复请使用中文。
 """
 
     # 调用 LLM 获取第三方观点
@@ -121,13 +121,13 @@ def debate_room_agent(state: AgentState):
     try:
         logger.info("开始调用 LLM 获取第三方分析...")
         messages = [
-            {"role": "system", "content": "You are a professional financial analyst. Please provide your analysis in English only, not in Chinese or any other language."},
+            {"role": "system", "content": "你是一位专业的金融分析师，请使用中文提供你的分析。"},
             {"role": "user", "content": llm_prompt}
         ]
 
         # 使用log_llm_interaction装饰器记录LLM交互
         llm_response = log_llm_interaction(state)(
-            lambda: get_chat_completion(messages)
+            lambda: get_chat_completion_cached(messages)
         )()
 
         logger.info("LLM 返回响应完成")
@@ -150,12 +150,12 @@ def debate_room_agent(state: AgentState):
             except Exception as e:
                 # 如果解析失败，记录错误并使用默认值
                 logger.error(f"解析 LLM 回复失败: {e}")
-                llm_analysis = {"analysis": "Failed to parse LLM response",
-                                "score": 0, "reasoning": "Parsing error"}
+                llm_analysis = {"analysis": "LLM 响应解析失败",
+                                "score": 0, "reasoning": "解析错误"}
     except Exception as e:
         logger.error(f"调用 LLM 失败: {e}")
-        llm_analysis = {"analysis": "LLM API call failed",
-                        "score": 0, "reasoning": "API error"}
+        llm_analysis = {"analysis": "LLM API 调用失败",
+                        "score": 0, "reasoning": "API 错误"}
 
     # 计算混合置信度差异
     confidence_diff = bull_confidence - bear_confidence
@@ -174,15 +174,15 @@ def debate_room_agent(state: AgentState):
     # 基于混合置信度差异确定最终建议
     if abs(mixed_confidence_diff) < 0.1:  # 接近争论
         final_signal = "neutral"
-        reasoning = "Balanced debate with strong arguments on both sides"
+        reasoning = "双方论据势均力敌，辩论结果均衡"
         confidence = max(bull_confidence, bear_confidence)
     elif mixed_confidence_diff > 0:  # 看多胜出
         final_signal = "bullish"
-        reasoning = "Bullish arguments more convincing"
+        reasoning = "看多论据更具说服力"
         confidence = bull_confidence
     else:  # 看空胜出
         final_signal = "bearish"
-        reasoning = "Bearish arguments more convincing"
+        reasoning = "看空论据更具说服力"
         confidence = bear_confidence
 
     logger.info(f"最终投资信号: {final_signal}, 置信度: {confidence}")
@@ -208,14 +208,14 @@ def debate_room_agent(state: AgentState):
     )
 
     if show_reasoning:
-        show_agent_reasoning(message_content, "Debate Room")
+        show_agent_reasoning(message_content, "辩论室")
         # 保存推理信息到metadata供API使用
         state["metadata"]["agent_reasoning"] = message_content
 
-    show_workflow_status("Debate Room", "completed")
+    show_workflow_status("辩论室", "completed")
     logger.info("辩论室分析完成")
     return {
-        "messages": state["messages"] + [message],
+        "messages": [message],
         "data": {
             **state["data"],
             "debate_analysis": message_content
