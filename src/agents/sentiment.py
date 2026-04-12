@@ -44,25 +44,39 @@ def sentiment_agent(state: AgentState):
             # 如果没有publish_time字段，默认包含这条新闻
             recent_news.append(news)
 
-    sentiment_score = get_news_sentiment(recent_news, num_of_news=num_of_news)
-
-    # 根据情感分数生成交易信号和置信度
-    if sentiment_score >= 0.5:
-        signal = "bullish"
-        confidence = str(round(abs(sentiment_score) * 100)) + "%"
-    elif sentiment_score <= -0.5:
-        signal = "bearish"
-        confidence = str(round(abs(sentiment_score) * 100)) + "%"
-    else:
+    if not recent_news:
+        sentiment_score = 0.0
         signal = "neutral"
-        confidence = str(round((1 - abs(sentiment_score)) * 100)) + "%"
+        confidence = "0%"
+        message_content = {
+            "signal": signal,
+            "confidence": confidence,
+            "reasoning": "No usable recent news articles were available for sentiment analysis.",
+            "news_count": 0,
+            "status": "unavailable",
+        }
+    else:
+        sentiment_score = get_news_sentiment(recent_news, num_of_news=num_of_news)
 
-    # 生成分析结果
-    message_content = {
-        "signal": signal,
-        "confidence": confidence,
-        "reasoning": f"Based on {len(recent_news)} recent news articles, sentiment score: {sentiment_score:.2f}"
-    }
+        # 根据情感分数生成交易信号和置信度
+        if sentiment_score >= 0.5:
+            signal = "bullish"
+            confidence = str(round(abs(sentiment_score) * 100)) + "%"
+        elif sentiment_score <= -0.5:
+            signal = "bearish"
+            confidence = str(round(abs(sentiment_score) * 100)) + "%"
+        else:
+            signal = "neutral"
+            confidence = str(round((1 - abs(sentiment_score)) * 100)) + "%"
+
+        # 生成分析结果
+        message_content = {
+            "signal": signal,
+            "confidence": confidence,
+            "reasoning": f"Based on {len(recent_news)} recent news articles, sentiment score: {sentiment_score:.2f}",
+            "news_count": len(recent_news),
+            "status": "ok",
+        }
 
     # 如果需要显示推理过程
     if show_reasoning:

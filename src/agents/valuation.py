@@ -19,7 +19,34 @@ def valuation_agent(state: AgentState):
     previous_financial_line_item = data["financial_line_items"][1]
     market_cap = data["market_cap"]
 
+    if not market_cap or market_cap <= 0:
+        message_content = {
+            "signal": "neutral",
+            "confidence": "0%",
+            "status": "unavailable",
+            "reasoning": {
+                "error": "Market cap unavailable; valuation skipped."
+            }
+        }
+        message = HumanMessage(
+            content=json.dumps(message_content),
+            name="valuation_agent",
+        )
+        if show_reasoning:
+            show_agent_reasoning(message_content, "Valuation Analysis Agent")
+            state["metadata"]["agent_reasoning"] = message_content
+        show_workflow_status("Valuation Agent", "completed")
+        return {
+            "messages": [message],
+            "data": {
+                **data,
+                "valuation_analysis": message_content
+            },
+            "metadata": state["metadata"],
+        }
+
     reasoning = {}
+    earnings_growth = metrics.get("earnings_growth") or 0.0
 
     # Calculate working capital change
     working_capital_change = (current_financial_line_item.get(
@@ -32,7 +59,7 @@ def valuation_agent(state: AgentState):
             'depreciation_and_amortization'),
         capex=current_financial_line_item.get('capital_expenditure'),
         working_capital_change=working_capital_change,
-        growth_rate=metrics["earnings_growth"],
+        growth_rate=earnings_growth,
         required_return=0.15,
         margin_of_safety=0.25
     )
@@ -40,7 +67,7 @@ def valuation_agent(state: AgentState):
     # DCF Valuation
     dcf_value = calculate_intrinsic_value(
         free_cash_flow=current_financial_line_item.get('free_cash_flow'),
-        growth_rate=metrics["earnings_growth"],
+        growth_rate=earnings_growth,
         discount_rate=0.10,
         terminal_growth_rate=0.03,
         num_years=5,

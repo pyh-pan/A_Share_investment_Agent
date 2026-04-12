@@ -1,4 +1,5 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Callable, Optional
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import pandas as pd
 import akshare as ak
 from datetime import datetime, timedelta
@@ -8,26 +9,240 @@ from src.utils.logging_config import setup_logger
 
 # 设置日志记录
 logger = setup_logger('api')
+_FETCH_FAILURE_CACHE: Dict[str, float] = {}
+_FETCH_FAILURE_COOLDOWN_SECONDS = 180
+
+
+def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    """Convert common numeric-like values to float and normalize NaN."""
+    try:
+        if value is None:
+            return default
+        if pd.isna(value):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_ak_symbol(symbol: str) -> str:
+    if symbol.startswith(("5", "6", "9")):
+        return f"sh{symbol}"
+    return f"sz{symbol}"
+
+
+def _standardize_price_dataframe(df: pd.DataFrame, source: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    normalized = df.copy()
+    column_mappings = {
+        "日期": "date",
+        "开盘": "open",
+        "最高": "high",
+        "最低": "low",
+        "收盘": "close",
+        "成交量": "volume",
+        "成交额": "amount",
+        "振幅": "amplitude",
+        "涨跌幅": "pct_change",
+        "涨跌额": "change_amount",
+        "换手率": "turnover",
+    }
+    normalized = normalized.rename(columns=column_mappings)
+
+    if source == "tencent":
+        if "amount" in normalized.columns and "volume" not in normalized.columns:
+            normalized["volume"] = pd.to_numeric(
+                normalized["amount"], errors="coerce"
+            ) * 100
+        if "close" in normalized.columns and "amount" in normalized.columns:
+            normalized["amount"] = pd.to_numeric(
+                normalized["close"], errors="coerce"
+            ) * pd.to_numeric(normalized["volume"], errors="coerce")
+
+    required_columns = [
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "amplitude",
+        "pct_change",
+        "change_amount",
+        "turnover",
+    ]
+    for col in required_columns:
+        if col not in normalized.columns:
+            normalized[col] = np.nan
+
+    normalized["date"] = pd.to_datetime(normalized["date"])
+    for col in required_columns[1:]:
+        normalized[col] = pd.to_numeric(normalized[col], errors="coerce")
+
+    normalized = normalized.sort_values("date").reset_index(drop=True)
+    normalized.attrs["data_source"] = source
+    return normalized
+
+
+def _fetch_with_fallback(
+    symbol: str,
+    fetchers: List[tuple[str, Callable[[], Any], int]],
+    entity_name: str,
+) -> tuple[Optional[Any], str, Optional[str]]:
+    last_error = None
+    for source_name, fetcher, timeout_seconds in fetchers:
+        cache_key = f"{entity_name}:{symbol}:{source_name}"
+        failed_at = _FETCH_FAILURE_CACHE.get(cache_key)
+        if failed_at and (datetime.now().timestamp() - failed_at) < _FETCH_FAILURE_COOLDOWN_SECONDS:
+            logger.info(
+                f"Skip {source_name} for {entity_name} of {symbol} due to recent failure cooldown"
+            )
+            continue
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(fetcher)
+                result = future.result(timeout=timeout_seconds)
+            if result is None:
+                raise ValueError(f"{source_name} returned None")
+            if isinstance(result, pd.DataFrame) and result.empty:
+                raise ValueError(f"{source_name} returned empty dataframe")
+            _FETCH_FAILURE_CACHE.pop(cache_key, None)
+            logger.info(f"Using {source_name} source for {entity_name} of {symbol}")
+            return result, source_name, None
+        except FuturesTimeoutError:
+            last_error = f"{source_name} timed out after {timeout_seconds}s"
+            _FETCH_FAILURE_CACHE[cache_key] = datetime.now().timestamp()
+            logger.warning(
+                f"{entity_name} fetch timed out via {source_name} for {symbol} after {timeout_seconds}s"
+            )
+        except Exception as e:
+            last_error = str(e)
+            _FETCH_FAILURE_CACHE[cache_key] = datetime.now().timestamp()
+            logger.warning(
+                f"{entity_name} fetch failed via {source_name} for {symbol}: {e}"
+            )
+    return None, "unavailable", last_error
+
+
+def _fetch_market_snapshot(symbol: str) -> Dict[str, Any]:
+    normalized_symbol = _normalize_ak_symbol(symbol)
+    snapshot: Dict[str, Any] = {
+        "latest_price": None,
+        "market_cap": None,
+        "float_market_cap": None,
+        "total_shares": None,
+        "float_shares": None,
+        "pe_ratio": None,
+        "price_to_book": None,
+        "data_source": "unavailable",
+        "error": None,
+    }
+
+    def _spot_em():
+        df = ak.stock_zh_a_spot_em()
+        row = df[df["代码"] == symbol]
+        if row.empty:
+            raise ValueError(f"No Eastmoney realtime quote found for {symbol}")
+        return row.iloc[0]
+
+    fetchers: List[tuple[str, Callable[[], Any]]] = [
+        ("eastmoney_realtime", _spot_em, 15),
+        ("eastmoney_info", lambda: ak.stock_individual_info_em(symbol=symbol), 15),
+        (
+            "sina_daily",
+            lambda: ak.stock_zh_a_daily(
+                symbol=normalized_symbol,
+                start_date=(datetime.now() - timedelta(days=20)).strftime("%Y%m%d"),
+                end_date=datetime.now().strftime("%Y%m%d"),
+                adjust="qfq",
+            ),
+            15,
+        ),
+        (
+            "tencent_hist",
+            lambda: ak.stock_zh_a_hist_tx(
+                symbol=normalized_symbol,
+                start_date=(datetime.now() - timedelta(days=20)).strftime("%Y%m%d"),
+                end_date=datetime.now().strftime("%Y%m%d"),
+                adjust="qfq",
+            ),
+            15,
+        ),
+    ]
+
+    result, source_name, error = _fetch_with_fallback(
+        symbol=symbol,
+        fetchers=fetchers,
+        entity_name="market snapshot",
+    )
+    snapshot["data_source"] = source_name
+    snapshot["error"] = error
+
+    if result is None:
+        return snapshot
+
+    if source_name == "eastmoney_realtime":
+        stock_data = result
+        snapshot.update(
+            {
+                "latest_price": _safe_float(stock_data.get("最新价")),
+                "market_cap": _safe_float(stock_data.get("总市值")),
+                "float_market_cap": _safe_float(stock_data.get("流通市值")),
+                "pe_ratio": _safe_float(stock_data.get("市盈率-动态")),
+                "price_to_book": _safe_float(stock_data.get("市净率")),
+            }
+        )
+        return snapshot
+
+    if source_name == "eastmoney_info":
+        info_map = dict(zip(result["item"], result["value"]))
+        latest_price = _safe_float(info_map.get("最新"))
+        total_shares = _safe_float(info_map.get("总股本"))
+        float_shares = _safe_float(info_map.get("流通股"))
+        snapshot.update(
+            {
+                "latest_price": latest_price,
+                "market_cap": _safe_float(info_map.get("总市值")),
+                "float_market_cap": _safe_float(info_map.get("流通市值")),
+                "total_shares": total_shares,
+                "float_shares": float_shares,
+            }
+        )
+        if snapshot["market_cap"] is None and latest_price is not None and total_shares is not None:
+            snapshot["market_cap"] = latest_price * total_shares
+        if (
+            snapshot["float_market_cap"] is None
+            and latest_price is not None
+            and float_shares is not None
+        ):
+            snapshot["float_market_cap"] = latest_price * float_shares
+        return snapshot
+
+    standardized = _standardize_price_dataframe(result, source_name)
+    latest_row = standardized.iloc[-1]
+    snapshot["latest_price"] = _safe_float(latest_row.get("close"))
+    if source_name == "sina" or source_name == "sina_daily":
+        float_shares = None
+        if "outstanding_share" in result.columns:
+            float_shares = _safe_float(result.iloc[-1].get("outstanding_share"))
+        snapshot["float_shares"] = float_shares
+        if snapshot["latest_price"] is not None and float_shares is not None:
+            snapshot["float_market_cap"] = snapshot["latest_price"] * float_shares
+            snapshot["market_cap"] = snapshot["float_market_cap"]
+    return snapshot
 
 
 def get_financial_metrics(symbol: str) -> Dict[str, Any]:
     """获取财务指标数据"""
     logger.info(f"Getting financial indicators for {symbol}...")
     try:
-        # 获取实时行情数据（用于市值和估值比率）
-        logger.info("Fetching real-time quotes...")
-        realtime_data = ak.stock_zh_a_spot_em()
-        if realtime_data is None or realtime_data.empty:
-            logger.warning("No real-time quotes data available")
-            return [{}]
-
-        stock_data = realtime_data[realtime_data['代码'] == symbol]
-        if stock_data.empty:
-            logger.warning(f"No real-time quotes found for {symbol}")
-            return [{}]
-
-        stock_data = stock_data.iloc[0]
-        logger.info("✓ Real-time quotes fetched")
+        market_snapshot = _fetch_market_snapshot(symbol)
+        logger.info(
+            f"Market snapshot source for {symbol}: {market_snapshot.get('data_source')}"
+        )
 
         # 获取新浪财务指标
         logger.info("Fetching Sina financial indicators...")
@@ -36,7 +251,11 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
             symbol=symbol, start_year=str(current_year-1))
         if financial_data is None or financial_data.empty:
             logger.warning("No financial indicator data available")
-            return [{}]
+            return [{
+                "_status": "unavailable",
+                "_error": "No financial indicator data available",
+                "_data_source": market_snapshot.get("data_source"),
+            }]
 
         # 按日期排序并获取最新的数据
         financial_data['日期'] = pd.to_datetime(financial_data['日期'])
@@ -67,21 +286,53 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
         # 构建完整指标数据
         logger.info("Building indicators...")
         try:
-            def convert_percentage(value: float) -> float:
+            def convert_percentage(value: float) -> Optional[float]:
                 """将百分比值转换为小数"""
                 try:
-                    return float(value) / 100.0 if value is not None else 0.0
-                except:
-                    return 0.0
+                    if value is None or pd.isna(value):
+                        return None
+                    return float(value) / 100.0
+                except Exception:
+                    return None
+
+            latest_price = market_snapshot.get("latest_price")
+            market_cap = market_snapshot.get("market_cap")
+            float_market_cap = market_snapshot.get("float_market_cap")
+            revenue = _safe_float(latest_income.get("营业总收入"))
+            net_income = _safe_float(latest_income.get("净利润"))
+            book_value_per_share = _safe_float(
+                latest_financial.get("每股净资产_调整后(元)")
+            )
+            if book_value_per_share is None:
+                book_value_per_share = _safe_float(
+                    latest_financial.get("每股净资产_调整前(元)")
+                )
+
+            pe_ratio = market_snapshot.get("pe_ratio")
+            if pe_ratio is None and market_cap is not None and net_income and net_income > 0:
+                pe_ratio = market_cap / net_income
+
+            price_to_book = market_snapshot.get("price_to_book")
+            if (
+                price_to_book is None
+                and latest_price is not None
+                and book_value_per_share
+                and book_value_per_share > 0
+            ):
+                price_to_book = latest_price / book_value_per_share
+
+            price_to_sales = None
+            if market_cap is not None and revenue and revenue > 0:
+                price_to_sales = market_cap / revenue
 
             all_metrics = {
                 # 市场数据
-                "market_cap": float(stock_data.get("总市值", 0)),
-                "float_market_cap": float(stock_data.get("流通市值", 0)),
+                "market_cap": market_cap,
+                "float_market_cap": float_market_cap,
 
                 # 盈利数据
-                "revenue": float(latest_income.get("营业总收入", 0)),
-                "net_income": float(latest_income.get("净利润", 0)),
+                "revenue": revenue,
+                "net_income": net_income,
                 "return_on_equity": convert_percentage(latest_financial.get("净资产收益率(%)", 0)),
                 "net_margin": convert_percentage(latest_financial.get("销售净利率(%)", 0)),
                 "operating_margin": convert_percentage(latest_financial.get("营业利润率(%)", 0)),
@@ -92,15 +343,15 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
                 "book_value_growth": convert_percentage(latest_financial.get("净资产增长率(%)", 0)),
 
                 # 财务健康指标
-                "current_ratio": float(latest_financial.get("流动比率", 0)),
+                "current_ratio": _safe_float(latest_financial.get("流动比率")),
                 "debt_to_equity": convert_percentage(latest_financial.get("资产负债率(%)", 0)),
-                "free_cash_flow_per_share": float(latest_financial.get("每股经营性现金流(元)", 0)),
-                "earnings_per_share": float(latest_financial.get("加权每股收益(元)", 0)),
+                "free_cash_flow_per_share": _safe_float(latest_financial.get("每股经营性现金流(元)")),
+                "earnings_per_share": _safe_float(latest_financial.get("加权每股收益(元)")),
 
                 # 估值比率
-                "pe_ratio": float(stock_data.get("市盈率-动态", 0)),
-                "price_to_book": float(stock_data.get("市净率", 0)),
-                "price_to_sales": float(stock_data.get("总市值", 0)) / float(latest_income.get("营业总收入", 1)) if float(latest_income.get("营业总收入", 0)) > 0 else 0,
+                "pe_ratio": pe_ratio,
+                "price_to_book": price_to_book,
+                "price_to_sales": price_to_sales,
             }
 
             # 只返回 agent 需要的指标
@@ -109,6 +360,8 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
                 "return_on_equity": all_metrics["return_on_equity"],
                 "net_margin": all_metrics["net_margin"],
                 "operating_margin": all_metrics["operating_margin"],
+                "market_cap": all_metrics["market_cap"],
+                "float_market_cap": all_metrics["float_market_cap"],
 
                 # 增长指标
                 "revenue_growth": all_metrics["revenue_growth"],
@@ -125,6 +378,12 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
                 "pe_ratio": all_metrics["pe_ratio"],
                 "price_to_book": all_metrics["price_to_book"],
                 "price_to_sales": all_metrics["price_to_sales"],
+                "_status": "ok",
+                "_data_source": {
+                    "market_snapshot": market_snapshot.get("data_source"),
+                    "financial_indicator": "sina",
+                    "income_statement": "sina",
+                },
             }
 
             logger.info("✓ Indicators built successfully")
@@ -142,11 +401,19 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
 
         except Exception as e:
             logger.error(f"Error building indicators: {e}")
-            return [{}]
+            return [{
+                "_status": "unavailable",
+                "_error": str(e),
+                "_data_source": market_snapshot.get("data_source"),
+            }]
 
     except Exception as e:
         logger.error(f"Error getting financial indicators: {e}")
-        return [{}]
+        return [{
+            "_status": "unavailable",
+            "_error": str(e),
+            "_data_source": "unavailable",
+        }]
 
 
 def get_financial_statements(symbol: str) -> Dict[str, Any]:
@@ -279,25 +546,54 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         return [default_item, default_item]
 
 
-def get_market_data(symbol: str) -> Dict[str, Any]:
+def get_market_data(
+    symbol: str,
+    price_history: Optional[pd.DataFrame] = None,
+    market_cap: Optional[float] = None,
+) -> Dict[str, Any]:
     """获取市场数据"""
     try:
-        # 获取实时行情
-        realtime_data = ak.stock_zh_a_spot_em()
-        stock_data = realtime_data[realtime_data['代码'] == symbol].iloc[0]
+        snapshot = {
+            "market_cap": market_cap,
+            "data_source": "financial_metrics" if market_cap is not None else "unavailable",
+        }
+        if market_cap is None:
+            snapshot = _fetch_market_snapshot(symbol)
+        if price_history is None:
+            price_history = get_price_history(symbol)
+
+        if price_history is None or price_history.empty:
+            latest_volume = None
+            avg_volume = None
+            high_52w = None
+            low_52w = None
+        else:
+            latest_volume = _safe_float(price_history["volume"].iloc[-1], 0.0)
+            avg_volume = _safe_float(price_history["volume"].tail(20).mean(), 0.0)
+            high_52w = _safe_float(price_history["high"].max())
+            low_52w = _safe_float(price_history["low"].min())
 
         return {
-            "market_cap": float(stock_data.get("总市值", 0)),
-            "volume": float(stock_data.get("成交量", 0)),
-            # A股没有平均成交量，暂用当日成交量
-            "average_volume": float(stock_data.get("成交量", 0)),
-            "fifty_two_week_high": float(stock_data.get("52周最高", 0)),
-            "fifty_two_week_low": float(stock_data.get("52周最低", 0))
+            "market_cap": snapshot.get("market_cap"),
+            "volume": latest_volume,
+            "average_volume": avg_volume,
+            "fifty_two_week_high": high_52w,
+            "fifty_two_week_low": low_52w,
+            "_data_source": {
+                "snapshot": snapshot.get("data_source"),
+                "price_history": getattr(price_history, "attrs", {}).get("data_source", "unavailable"),
+            },
+            "_status": "ok" if any(
+                value is not None for value in [snapshot.get("market_cap"), latest_volume, high_52w, low_52w]
+            ) else "unavailable",
         }
 
     except Exception as e:
         logger.error(f"Error getting market data: {e}")
-        return {}
+        return {
+            "_status": "unavailable",
+            "_error": str(e),
+        }
 
 
 def get_price_history(symbol: str, start_date: str = None, end_date: str = None, adjust: str = "qfq") -> pd.DataFrame:
@@ -362,37 +658,52 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
         logger.info(f"Start date: {start_date.strftime('%Y-%m-%d')}")
         logger.info(f"End date: {end_date.strftime('%Y-%m-%d')}")
 
+        normalized_symbol = _normalize_ak_symbol(symbol)
+
         def get_and_process_data(start_date, end_date):
-            """获取并处理数据，包括重命名列等操作"""
-            df = ak.stock_zh_a_hist(
+            """获取并处理数据，包括多数据源降级。"""
+            fetchers = [
+                (
+                    "eastmoney",
+                    lambda: ak.stock_zh_a_hist(
+                        symbol=symbol,
+                        period="daily",
+                        start_date=start_date.strftime("%Y%m%d"),
+                        end_date=end_date.strftime("%Y%m%d"),
+                        adjust=adjust,
+                    ),
+                    15,
+                ),
+                (
+                    "sina",
+                    lambda: ak.stock_zh_a_daily(
+                        symbol=normalized_symbol,
+                        start_date=start_date.strftime("%Y%m%d"),
+                        end_date=end_date.strftime("%Y%m%d"),
+                        adjust=adjust,
+                    ),
+                    15,
+                ),
+                (
+                    "tencent",
+                    lambda: ak.stock_zh_a_hist_tx(
+                        symbol=normalized_symbol,
+                        start_date=start_date.strftime("%Y%m%d"),
+                        end_date=end_date.strftime("%Y%m%d"),
+                        adjust=adjust,
+                    ),
+                    15,
+                ),
+            ]
+
+            result, source_name, _ = _fetch_with_fallback(
                 symbol=symbol,
-                period="daily",
-                start_date=start_date.strftime("%Y%m%d"),
-                end_date=end_date.strftime("%Y%m%d"),
-                adjust=adjust
+                fetchers=fetchers,
+                entity_name="price history",
             )
-
-            if df is None or df.empty:
+            if result is None:
                 return pd.DataFrame()
-
-            # 重命名列以匹配技术分析代理的需求
-            df = df.rename(columns={
-                "日期": "date",
-                "开盘": "open",
-                "最高": "high",
-                "最低": "low",
-                "收盘": "close",
-                "成交量": "volume",
-                "成交额": "amount",
-                "振幅": "amplitude",
-                "涨跌幅": "pct_change",
-                "涨跌额": "change_amount",
-                "换手率": "turnover"
-            })
-
-            # 确保日期列为datetime类型
-            df["date"] = pd.to_datetime(df["date"])
-            return df
+            return _standardize_price_dataframe(result, source_name)
 
         # 获取历史行情数据
         df = get_and_process_data(start_date, end_date)
@@ -535,6 +846,7 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
 
         logger.info(
             f"Successfully fetched price history data ({len(df)} records)")
+        logger.info(f"Price history source for {symbol}: {df.attrs.get('data_source', 'unknown')}")
 
         # 检查并报告NaN值
         nan_columns = df.isna().sum()

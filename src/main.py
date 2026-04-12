@@ -184,8 +184,6 @@ def run_fastapi():
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
-    fastapi_thread = threading.Thread(target=run_fastapi, daemon=True)
-    fastapi_thread.start()
     parser = argparse.ArgumentParser(
         description='Run the hedge fund trading system')
     parser.add_argument('--ticker', type=str, required=True,
@@ -204,7 +202,12 @@ if __name__ == "__main__":
                         default=0, help='Initial stock position (default: 0)')
     parser.add_argument('--summary', action='store_true',
                         help='Show beautiful summary report at the end')
+    parser.add_argument('--start-backend', action='store_true',
+                        help='Start the FastAPI backend alongside CLI execution')
     args = parser.parse_args()
+    if args.start_backend:
+        fastapi_thread = threading.Thread(target=run_fastapi, daemon=True)
+        fastapi_thread.start()
     current_date = datetime.now()
     yesterday = current_date - timedelta(days=1)
     end_date = yesterday if not args.end_date else min(

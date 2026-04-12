@@ -35,6 +35,30 @@ def technical_analyst_agent(state: AgentState):
     prices = data["prices"]
     prices_df = prices_to_df(prices)
 
+    minimum_rows = 60
+    required_columns = {"close", "open", "high", "low", "volume"}
+    if len(prices_df) < minimum_rows or not required_columns.issubset(prices_df.columns):
+        analysis_report = {
+            "signal": "neutral",
+            "confidence": "0%",
+            "status": "insufficient_price_data",
+            "reason": f"Need at least {minimum_rows} rows of price data, got {len(prices_df)}.",
+            "strategy_signals": {},
+        }
+        message = HumanMessage(
+            content=json.dumps(analysis_report),
+            name="technical_analyst_agent",
+        )
+        if show_reasoning:
+            show_agent_reasoning(analysis_report, "Technical Analyst")
+            state["metadata"]["agent_reasoning"] = analysis_report
+        show_workflow_status("Technical Analyst", "completed")
+        return {
+            "messages": [message],
+            "data": data,
+            "metadata": state["metadata"],
+        }
+
     # Initialize confidence variable
     confidence = 0.0
 

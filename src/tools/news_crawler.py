@@ -3,6 +3,7 @@ import sys
 import json
 from datetime import datetime, timedelta
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import pandas as pd
 from urllib.parse import urlparse
 from src.tools.openrouter_config import get_chat_completion, logger as api_logger
@@ -304,11 +305,14 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
             # 执行搜索
             search_options = SearchOptions(
                 limit=fetch_count * 2,  # 获取更多结果以便过滤
-                timeout=30000,
+                timeout=10000,
                 locale="zh-CN"
             )
 
-            search_response = google_search_sync(search_query, search_options)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    google_search_sync, search_query, search_options)
+                search_response = future.result(timeout=12)
 
             if search_response.results:
                 # 转换搜索结果为新闻格式
@@ -319,13 +323,22 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
             else:
                 print("Google 搜索未返回有效结果，尝试回退到 akshare")
 
+        except FuturesTimeoutError:
+            print("Google 搜索超时，回退到 akshare")
         except Exception as e:
             print(f"Google 搜索获取新闻时出错: {e}，回退到 akshare")
 
     # 如果 Google 搜索失败，回退到 akshare
     if not new_news_list:
         print("使用 akshare 获取新闻...")
-        new_news_list = get_stock_news_via_akshare(symbol, fetch_count)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    get_stock_news_via_akshare, symbol, fetch_count)
+                new_news_list = future.result(timeout=12)
+        except FuturesTimeoutError:
+            print("akshare 获取新闻超时")
+            new_news_list = []
 
     # 合并缓存和新获取的新闻，去重
     if cached_news and new_news_list:
@@ -401,7 +414,7 @@ def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
 
     # 生成新闻内容的唯一标识
     news_key = "|".join([
-        f"{news['title']}|{news['content'][:100]}|{news['publish_time']}"
+        f"{news.get('title', '')}|{news.get('content', '')[:100]}|{news.get('publish_time', '')}"
         for news in news_list[:num_of_news]
     ])
 
@@ -452,10 +465,10 @@ def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
 
     # 准备新闻内容
     news_content = "\n\n".join([
-        f"标题：{news['title']}\n"
-        f"来源：{news['source']}\n"
-        f"时间：{news['publish_time']}\n"
-        f"内容：{news['content']}"
+        f"标题：{news.get('title', '')}\n"
+        f"来源：{news.get('source', '未知来源')}\n"
+        f"时间：{news.get('publish_time', '未知时间')}\n"
+        f"内容：{news.get('content', '')}"
         for news in news_list[:num_of_news]  # 使用指定数量的新闻
     ])
 

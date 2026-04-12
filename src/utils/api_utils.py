@@ -347,7 +347,7 @@ def agent_endpoint(agent_name: str, description: str = ""):
                 try:
                     if _has_log_system:
                         log_storage = get_log_storage()
-                        if log_storage:
+                        if log_storage and run_id:
                             log_entry = AgentExecutionLog(
                                 agent_name=agent_name,
                                 run_id=run_id,
@@ -398,7 +398,7 @@ def agent_endpoint(agent_name: str, description: str = ""):
                 try:
                     if _has_log_system:
                         log_storage = get_log_storage()
-                        if log_storage:
+                        if log_storage and run_id:
                             log_entry = AgentExecutionLog(
                                 agent_name=agent_name,
                                 run_id=run_id,

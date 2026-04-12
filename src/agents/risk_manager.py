@@ -22,6 +22,38 @@ def risk_management_agent(state: AgentState):
 
     prices_df = prices_to_df(data["prices"])
 
+    if len(prices_df) < 2:
+        message_content = {
+            "max_position_size": 0.0,
+            "risk_score": 10,
+            "trading_action": "hold",
+            "risk_metrics": {
+                "volatility": 0.0,
+                "value_at_risk_95": 0.0,
+                "max_drawdown": 0.0,
+                "market_risk_score": 10,
+                "stress_test_results": {},
+            },
+            "debate_analysis": {},
+            "reasoning": "Price data unavailable, defaulting to hold.",
+        }
+        message = HumanMessage(
+            content=json.dumps(message_content),
+            name="risk_management_agent",
+        )
+        if show_reasoning:
+            show_agent_reasoning(message_content, "Risk Management Agent")
+            state["metadata"]["agent_reasoning"] = message_content
+        show_workflow_status("Risk Manager", "completed")
+        return {
+            "messages": state["messages"] + [message],
+            "data": {
+                **data,
+                "risk_analysis": message_content
+            },
+            "metadata": state["metadata"],
+        }
+
     # Fetch debate room message instead of individual analyst messages
     debate_message = next(
         msg for msg in state["messages"] if msg.name == "debate_room_agent")

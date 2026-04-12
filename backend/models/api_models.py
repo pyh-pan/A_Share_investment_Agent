@@ -70,7 +70,7 @@ class StockAnalysisRequest(BaseModel):
     )
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "ticker": "002848",
                 "show_reasoning": True,
@@ -94,7 +94,7 @@ class StockAnalysisResponse(BaseModel):
     completed_at: Optional[datetime] = Field(None, description="任务完成时间")
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "run_id": "550e8400-e29b-41d4-a716-446655440000",
                 "ticker": "002848",

@@ -48,13 +48,15 @@ def market_data_agent(state: AgentState):
         logger.warning(f"警告：无法获取{ticker}的价格数据，将使用空数据继续")
         prices_df = pd.DataFrame(
             columns=['close', 'open', 'high', 'low', 'volume'])
+    price_data_source = getattr(prices_df, "attrs", {}).get("data_source", "unavailable")
 
     # 获取财务指标
     try:
         financial_metrics = get_financial_metrics(ticker)
     except Exception as e:
         logger.error(f"获取财务指标失败: {str(e)}")
-        financial_metrics = {}
+        financial_metrics = [{"_status": "unavailable", "_error": str(e)}]
+    financial_metric_payload = financial_metrics[0] if financial_metrics else {}
 
     # 获取财务报表
     try:
@@ -65,10 +67,14 @@ def market_data_agent(state: AgentState):
 
     # 获取市场数据
     try:
-        market_data = get_market_data(ticker)
+        market_data = get_market_data(
+            ticker,
+            price_history=prices_df,
+            market_cap=financial_metric_payload.get("market_cap"),
+        )
     except Exception as e:
         logger.error(f"获取市场数据失败: {str(e)}")
-        market_data = {"market_cap": 0}
+        market_data = {"market_cap": 0, "_status": "unavailable", "_error": str(e)}
 
     # 确保数据格式正确
     if not isinstance(prices_df, pd.DataFrame):
@@ -78,18 +84,42 @@ def market_data_agent(state: AgentState):
     # 转换价格数据为字典格式
     prices_dict = prices_df.to_dict('records')
 
+    financial_metrics_available = any(
+        value is not None
+        for key, value in financial_metric_payload.items()
+        if not str(key).startswith("_")
+    )
+    financial_statements_available = any(
+        any(value not in (None, 0, 0.0, "") for value in item.values())
+        for item in financial_line_items
+    )
+    market_data_available = any(
+        market_data.get(field) is not None
+        for field in ["market_cap", "volume", "fifty_two_week_high", "fifty_two_week_low"]
+    )
+
     # 保存推理信息到metadata供API使用
     market_data_summary = {
         "ticker": ticker,
         "start_date": start_date,
         "end_date": end_date,
+        "data_sources": {
+            "price_history": price_data_source,
+            "financial_metrics": financial_metric_payload.get("_data_source", "unavailable"),
+            "market_data": market_data.get("_data_source", "unavailable"),
+        },
         "data_collected": {
             "price_history": len(prices_dict) > 0,
-            "financial_metrics": len(financial_metrics) > 0,
-            "financial_statements": len(financial_line_items) > 0,
-            "market_data": len(market_data) > 0
+            "financial_metrics": financial_metrics_available,
+            "financial_statements": financial_statements_available,
+            "market_data": market_data_available,
         },
-        "summary": f"为{ticker}收集了从{start_date}到{end_date}的市场数据，包括价格历史、财务指标和市场信息"
+        "summary": (
+            f"为{ticker}收集了从{start_date}到{end_date}的市场数据。"
+            f" 价格历史源: {price_data_source};"
+            f" 财务指标可用: {financial_metrics_available};"
+            f" 市场数据可用: {market_data_available}."
+        ),
     }
 
     if show_reasoning:

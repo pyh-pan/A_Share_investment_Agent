@@ -38,20 +38,20 @@ if os.path.exists(env_path):
 else:
     logger.warning(f"{ERROR_ICON} 未找到环境变量文件: {env_path}")
 
-# 验证环境变量
-api_key = os.getenv("GEMINI_API_KEY")
-model = os.getenv("GEMINI_MODEL")
+_gemini_api_key = os.getenv("GEMINI_API_KEY")
+_gemini_model = os.getenv("GEMINI_MODEL") or "gemini-1.5-flash"
+_gemini_client = None
 
-if not api_key:
-    logger.error(f"{ERROR_ICON} 未找到 GEMINI_API_KEY 环境变量")
-    raise ValueError("GEMINI_API_KEY not found in environment variables")
-if not model:
-    model = "gemini-1.5-flash"
-    logger.info(f"{WAIT_ICON} 使用默认模型: {model}")
 
-# 初始化 Gemini 客户端
-client = genai.Client(api_key=api_key)
-logger.info(f"{SUCCESS_ICON} Gemini 客户端初始化成功")
+def _get_gemini_client():
+    global _gemini_client
+    if _gemini_client is not None:
+        return _gemini_client
+    if not _gemini_api_key:
+        raise ValueError("GEMINI_API_KEY not found in environment variables")
+    _gemini_client = genai.Client(api_key=_gemini_api_key)
+    logger.info(f"{SUCCESS_ICON} Gemini 客户端初始化成功")
+    return _gemini_client
 
 
 @backoff.on_exception(
@@ -68,6 +68,7 @@ def generate_content_with_retry(model, contents, config=None):
         logger.debug(f"请求内容: {contents}")
         logger.debug(f"请求配置: {config}")
 
+        client = _get_gemini_client()
         response = client.models.generate_content(
             model=model,
             contents=contents,
