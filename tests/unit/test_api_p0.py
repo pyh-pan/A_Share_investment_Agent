@@ -1,9 +1,15 @@
 import pandas as pd
 
 from src.tools.api import calculate_wacc, get_northbound_flow
+from src.tools.data_source_manager import DataSourceManager
 
 
 def test_get_northbound_flow_signal_bullish(monkeypatch):
+    # Bypass DataSourceManager cache so the akshare mock is actually invoked
+    monkeypatch.setattr(
+        DataSourceManager, "fetch_with_fallback",
+        lambda self, cache_key, fetchers, source_names, cache_ttl_hours=24: fetchers[0](),
+    )
     mock_df = pd.DataFrame({"当日净流入": [12, 13, 14, 15, 16]})
     monkeypatch.setattr(
         "akshare.stock_hsgt_north_net_flow_in_em",

@@ -208,7 +208,8 @@ def risk_management_agent(state: AgentState):
         "messages": [message],
         "data": {
             **data,
-            "risk_analysis": message_content
+            "risk_analysis": message_content,
+            "risk_report": message_content,
         },
         "metadata": state["metadata"],
     }

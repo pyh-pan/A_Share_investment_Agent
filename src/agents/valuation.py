@@ -134,7 +134,8 @@ def valuation_agent(state: AgentState):
         "messages": [message],
         "data": {
             **data,
-            "valuation_analysis": message_content
+            "valuation_analysis": message_content,
+            "valuation_report": message_content,
         },
         "metadata": state["metadata"],
     }

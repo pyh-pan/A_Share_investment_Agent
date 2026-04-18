@@ -53,6 +53,7 @@ def macro_analyst_agent(state: AgentState):
             **data,
             "macro_analysis": message_content,
             "macro_indicators": macro_indicators,
+            "macro_report": message_content,
         },
         "metadata": state["metadata"],
     }

@@ -258,7 +258,8 @@ def fundamentals_agent(state: AgentState):
         "messages": [message],
         "data": {
             **data,
-            "fundamental_analysis": message_content
+            "fundamental_analysis": message_content,
+            "fundamentals_report": message_content,
         },
         "metadata": state["metadata"],
     }

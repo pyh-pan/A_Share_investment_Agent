@@ -55,7 +55,10 @@ def technical_analyst_agent(state: AgentState):
         show_workflow_status("技术分析师", "completed")
         return {
             "messages": [message],
-            "data": data,
+            "data": {
+                **data,
+                "technical_report": analysis_report,
+            },
             "metadata": state["metadata"],
         }
 
@@ -286,7 +289,10 @@ def technical_analyst_agent(state: AgentState):
 
     return {
         "messages": [message],
-        "data": data,
+        "data": {
+            **data,
+            "technical_report": analysis_report,
+        },
         "metadata": state["metadata"],
     }
 

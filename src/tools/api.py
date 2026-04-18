@@ -6,8 +6,9 @@ from datetime import datetime, timedelta
 import json
 import numpy as np
 from src.utils.logging_config import setup_logger
+from src.tools.data_source_manager import DataSourceManager
+from src.tools import data_fetchers
 
-# 设置日志记录
 logger = setup_logger('api')
 _FETCH_FAILURE_CACHE: Dict[str, float] = {}
 _FETCH_FAILURE_COOLDOWN_SECONDS = 180
@@ -151,24 +152,27 @@ def get_northbound_flow(days: int = 5) -> Dict[str, Any]:
         "signal": "neutral",
         "data_available": False,
     }
-    try:
+
+    cache_key = f"northbound_flow:{days}"
+
+    def _akshare_fetcher():
         fetch_fn = getattr(ak, "stock_hsgt_north_net_flow_in_em", None)
         if fetch_fn is not None:
             df = fetch_fn(symbol="北上")
         else:
             hist_fn = getattr(ak, "stock_hsgt_hist_em", None)
             if hist_fn is None:
-                return neutral
+                return None
             df = hist_fn(symbol="北向资金")
         if df is None or df.empty:
-            return neutral
+            return None
         flow_cols = [c for c in df.columns if ("净流入" in str(c) or "净买额" in str(c))]
         if not flow_cols:
-            return neutral
+            return None
         col = flow_cols[0]
         recent = pd.to_numeric(df[col], errors="coerce").dropna().tail(days)
         if recent.empty:
-            return neutral
+            return None
         total_inflow_billion = float(recent.sum())
         if total_inflow_billion > 50:
             trend, signal = "strong_inflow", "bullish"
@@ -186,49 +190,70 @@ def get_northbound_flow(days: int = 5) -> Dict[str, Any]:
             "signal": signal,
             "data_available": True,
         }
-    except Exception as e:
-        logger.warning(f"获取北向资金失败: {e}")
-        return neutral
+
+    dsm = DataSourceManager()
+    result = dsm.fetch_with_fallback(
+        cache_key=cache_key,
+        fetchers=[_akshare_fetcher],
+        source_names=["akshare"],
+        cache_ttl_hours=4,
+    )
+    if result is not None:
+        return result
+    return neutral
 
 
 def get_macro_indicators() -> Dict[str, Dict[str, Any]]:
     """Get core China macro indicators with graceful degradation."""
-    indicators: Dict[str, Dict[str, Any]] = {}
+    cache_key = "macro_indicators"
 
-    # Use lambdas so AttributeError is raised inside the try/except loop,
-    # not at dict construction time (some akshare functions may not exist)
-    fetch_map: Dict[str, Callable[[], pd.DataFrame]] = {
-        "gdp_growth": lambda: ak.macro_china_gdp(),
-        "cpi": lambda: ak.macro_china_cpi(),
-        "pmi": lambda: ak.macro_china_pmi(),
-        "lpr": lambda: ak.macro_china_lpr(),
-        "m2_growth": lambda: ak.macro_china_m2_yearly(),
-    }
-    key_words = {
-        "gdp_growth": ["同比增长", "增长", "GDP"],
-        "cpi": ["同比增长", "CPI"],
-        "pmi": ["PMI", "指数"],
-        "lpr": ["1Y", "5Y", "LPR", "报价"],
-        "m2_growth": ["同比增长", "M2", "增长"],
-    }
+    def _akshare_fetcher():
+        indicators: Dict[str, Dict[str, Any]] = {}
+        fetch_map: Dict[str, Callable[[], pd.DataFrame]] = {
+            "gdp_growth": lambda: ak.macro_china_gdp(),
+            "cpi": lambda: ak.macro_china_cpi(),
+            "pmi": lambda: ak.macro_china_pmi(),
+            "lpr": lambda: ak.macro_china_lpr(),
+            "m2_growth": lambda: ak.macro_china_m2_yearly(),
+        }
+        key_words = {
+            "gdp_growth": ["同比增长", "增长", "GDP"],
+            "cpi": ["同比增长", "CPI"],
+            "pmi": ["PMI", "指数"],
+            "lpr": ["1Y", "5Y", "LPR", "报价"],
+            "m2_growth": ["同比增长", "M2", "增长"],
+        }
+        has_any = False
+        for metric, fetcher in fetch_map.items():
+            try:
+                df = fetcher()
+                value = _extract_latest_numeric(df, key_words[metric])
+                indicators[metric] = {
+                    "value": value,
+                    "data_available": value is not None,
+                    "source": "akshare",
+                }
+                if value is not None:
+                    has_any = True
+            except Exception as e:
+                logger.warning(f"获取宏观指标 {metric} 失败: {e}")
+                indicators[metric] = {
+                    "value": None,
+                    "data_available": False,
+                    "source": "akshare",
+                }
+        return indicators if has_any else None
 
-    for metric, fetcher in fetch_map.items():
-        try:
-            df = fetcher()
-            value = _extract_latest_numeric(df, key_words[metric])
-            indicators[metric] = {
-                "value": value,
-                "data_available": value is not None,
-                "source": "akshare",
-            }
-        except Exception as e:
-            logger.warning(f"获取宏观指标 {metric} 失败: {e}")
-            indicators[metric] = {
-                "value": None,
-                "data_available": False,
-                "source": "akshare",
-            }
-    return indicators
+    dsm = DataSourceManager()
+    result = dsm.fetch_with_fallback(
+        cache_key=cache_key,
+        fetchers=[_akshare_fetcher],
+        source_names=["akshare"],
+        cache_ttl_hours=24,
+    )
+    if result is not None:
+        return result
+    return {}
 
 
 def get_industry_news(industry: str, max_news: int = 20) -> List[Dict[str, Any]]:
@@ -417,35 +442,29 @@ def _fetch_market_snapshot(symbol: str) -> Dict[str, Any]:
 def get_financial_metrics(symbol: str) -> Dict[str, Any]:
     """获取财务指标数据"""
     logger.info(f"正在获取 {symbol} 的财务指标...")
-    try:
+    cache_key = f"financial_metrics:{symbol}"
+
+    def _akshare_fetcher():
         market_snapshot = _fetch_market_snapshot(symbol)
         logger.info(
             f"市场快照数据来源 {symbol}: {market_snapshot.get('data_source')}"
         )
 
-        # 获取新浪财务指标
         logger.info("正在获取新浪财务指标...")
         current_year = datetime.now().year
         financial_data = ak.stock_financial_analysis_indicator(
             symbol=symbol, start_year=str(current_year-1))
         if financial_data is None or financial_data.empty:
             logger.warning("无可用财务指标数据")
-            return [{
-                "_status": "unavailable",
-                "_error": "无可用财务指标数据",
-                "_data_source": market_snapshot.get("data_source"),
-            }]
+            return None
 
-        # 按日期排序并获取最新的数据
         financial_data['日期'] = pd.to_datetime(financial_data['日期'])
         financial_data = financial_data.sort_values('日期', ascending=False)
-        latest_financial = financial_data.iloc[0] if not financial_data.empty else pd.Series(
-        )
+        latest_financial = financial_data.iloc[0] if not financial_data.empty else pd.Series()
         logger.info(
             f"✓ 财务指标获取完成 ({len(financial_data)} 条记录)")
         logger.info(f"最新数据日期: {latest_financial.get('日期')}")
 
-        # 获取利润表数据（用于计算 price_to_sales）
         logger.info("正在获取利润表...")
         try:
             income_statement = ak.stock_financial_report_sina(
@@ -462,11 +481,9 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
             logger.error(f"获取利润表出错: {e}")
             latest_income = pd.Series()
 
-        # 构建完整指标数据
         logger.info("正在构建指标...")
         try:
             def convert_percentage(value: float) -> Optional[float]:
-                """将百分比值转换为小数"""
                 try:
                     if value is None or pd.isna(value):
                         return None
@@ -504,59 +521,22 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
             if market_cap is not None and revenue and revenue > 0:
                 price_to_sales = market_cap / revenue
 
-            all_metrics = {
-                # 市场数据
-                "market_cap": market_cap,
-                "float_market_cap": float_market_cap,
-
-                # 盈利数据
-                "revenue": revenue,
-                "net_income": net_income,
+            agent_metrics = {
                 "return_on_equity": convert_percentage(latest_financial.get("净资产收益率(%)", 0)),
                 "net_margin": convert_percentage(latest_financial.get("销售净利率(%)", 0)),
                 "operating_margin": convert_percentage(latest_financial.get("营业利润率(%)", 0)),
-
-                # 增长指标
+                "market_cap": market_cap,
+                "float_market_cap": float_market_cap,
                 "revenue_growth": convert_percentage(latest_financial.get("主营业务收入增长率(%)", 0)),
                 "earnings_growth": convert_percentage(latest_financial.get("净利润增长率(%)", 0)),
                 "book_value_growth": convert_percentage(latest_financial.get("净资产增长率(%)", 0)),
-
-                # 财务健康指标
                 "current_ratio": _safe_float(latest_financial.get("流动比率")),
                 "debt_to_equity": convert_percentage(latest_financial.get("资产负债率(%)", 0)),
                 "free_cash_flow_per_share": _safe_float(latest_financial.get("每股经营性现金流(元)")),
                 "earnings_per_share": _safe_float(latest_financial.get("加权每股收益(元)")),
-
-                # 估值比率
                 "pe_ratio": pe_ratio,
                 "price_to_book": price_to_book,
                 "price_to_sales": price_to_sales,
-            }
-
-            # 只返回 agent 需要的指标
-            agent_metrics = {
-                # 盈利能力指标
-                "return_on_equity": all_metrics["return_on_equity"],
-                "net_margin": all_metrics["net_margin"],
-                "operating_margin": all_metrics["operating_margin"],
-                "market_cap": all_metrics["market_cap"],
-                "float_market_cap": all_metrics["float_market_cap"],
-
-                # 增长指标
-                "revenue_growth": all_metrics["revenue_growth"],
-                "earnings_growth": all_metrics["earnings_growth"],
-                "book_value_growth": all_metrics["book_value_growth"],
-
-                # 财务健康指标
-                "current_ratio": all_metrics["current_ratio"],
-                "debt_to_equity": all_metrics["debt_to_equity"],
-                "free_cash_flow_per_share": all_metrics["free_cash_flow_per_share"],
-                "earnings_per_share": all_metrics["earnings_per_share"],
-
-                # 估值比率
-                "pe_ratio": all_metrics["pe_ratio"],
-                "price_to_book": all_metrics["price_to_book"],
-                "price_to_sales": all_metrics["price_to_sales"],
                 "_status": "ok",
                 "_data_source": {
                     "market_snapshot": market_snapshot.get("data_source"),
@@ -566,12 +546,6 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
             }
 
             logger.info("✓ 指标构建成功")
-
-            # 打印所有获取到的指标数据（用于调试）
-            logger.debug("\n获取到的完整指标数据：")
-            for key, value in all_metrics.items():
-                logger.debug(f"{key}: {value}")
-
             logger.debug("\n传递给 agent 的指标数据：")
             for key, value in agent_metrics.items():
                 logger.debug(f"{key}: {value}")
@@ -580,26 +554,33 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
 
         except Exception as e:
             logger.error(f"构建指标出错: {e}")
-            return [{
-                "_status": "unavailable",
-                "_error": str(e),
-                "_data_source": market_snapshot.get("data_source"),
-            }]
+            return None
 
-    except Exception as e:
-        logger.error(f"获取财务指标出错: {e}")
-        return [{
-            "_status": "unavailable",
-            "_error": str(e),
-            "_data_source": "unavailable",
-        }]
+    def _tushare_fetcher():
+        return data_fetchers.fetch_financial_metrics_tushare(symbol)
+
+    dsm = DataSourceManager()
+    result = dsm.fetch_with_fallback(
+        cache_key=cache_key,
+        fetchers=[_akshare_fetcher, _tushare_fetcher],
+        source_names=["akshare", "tushare"],
+        cache_ttl_hours=24,
+    )
+    if result is not None:
+        return result
+    return [{
+        "_status": "unavailable",
+        "_error": "所有数据源均失败",
+        "_data_source": "unavailable",
+    }]
 
 
 def get_financial_statements(symbol: str) -> Dict[str, Any]:
     """获取财务报表数据"""
     logger.info(f"正在获取 {symbol} 的财务报表...")
-    try:
-        # 获取资产负债表数据
+    cache_key = f"financial_statements:{symbol}"
+
+    def _akshare_fetcher():
         logger.info("正在获取资产负债表...")
         try:
             balance_sheet = ak.stock_financial_report_sina(
@@ -620,7 +601,6 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
             latest_balance = pd.Series()
             previous_balance = pd.Series()
 
-        # 获取利润表数据
         logger.info("正在获取利润表...")
         try:
             income_statement = ak.stock_financial_report_sina(
@@ -641,7 +621,6 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
             latest_income = pd.Series()
             previous_income = pd.Series()
 
-        # 获取现金流量表数据
         logger.info("正在获取现金流量表...")
         try:
             cash_flow = ak.stock_financial_report_sina(
@@ -662,28 +641,16 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
             latest_cash_flow = pd.Series()
             previous_cash_flow = pd.Series()
 
-        # 构建财务数据
-        line_items = []
         try:
-            # 处理最新期间数据
             current_item = {
-                # 从利润表获取
                 "net_income": float(latest_income.get("净利润", 0)),
                 "operating_revenue": float(latest_income.get("营业总收入", 0)),
                 "operating_profit": float(latest_income.get("营业利润", 0)),
-
-                # 从资产负债表计算营运资金
                 "working_capital": float(latest_balance.get("流动资产合计", 0)) - float(latest_balance.get("流动负债合计", 0)),
-
-                # 从现金流量表获取
                 "depreciation_and_amortization": float(latest_cash_flow.get("固定资产折旧、油气资产折耗、生产性生物资产折旧", 0)),
                 "capital_expenditure": abs(float(latest_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0))),
                 "free_cash_flow": float(latest_cash_flow.get("经营活动产生的现金流量净额", 0)) - abs(float(latest_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0)))
             }
-            line_items.append(current_item)
-            logger.info("✓ 最新期数据处理成功")
-
-            # 处理上一期间数据
             previous_item = {
                 "net_income": float(previous_income.get("净利润", 0)),
                 "operating_revenue": float(previous_income.get("营业总收入", 0)),
@@ -693,36 +660,36 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
                 "capital_expenditure": abs(float(previous_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0))),
                 "free_cash_flow": float(previous_cash_flow.get("经营活动产生的现金流量净额", 0)) - abs(float(previous_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0)))
             }
-            line_items.append(previous_item)
+            logger.info("✓ 最新期数据处理成功")
             logger.info("✓ 上期数据处理成功")
+            return [current_item, previous_item]
 
         except Exception as e:
             logger.error(f"处理财务数据出错: {e}")
-            default_item = {
-                "net_income": 0,
-                "operating_revenue": 0,
-                "operating_profit": 0,
-                "working_capital": 0,
-                "depreciation_and_amortization": 0,
-                "capital_expenditure": 0,
-                "free_cash_flow": 0
-            }
-            line_items = [default_item, default_item]
+            return None
 
-        return line_items
+    def _tushare_fetcher():
+        return data_fetchers.fetch_financial_statements_tushare(symbol)
 
-    except Exception as e:
-        logger.error(f"获取财务报表出错: {e}")
-        default_item = {
-            "net_income": 0,
-            "operating_revenue": 0,
-            "operating_profit": 0,
-            "working_capital": 0,
-            "depreciation_and_amortization": 0,
-            "capital_expenditure": 0,
-            "free_cash_flow": 0
-        }
-        return [default_item, default_item]
+    dsm = DataSourceManager()
+    result = dsm.fetch_with_fallback(
+        cache_key=cache_key,
+        fetchers=[_akshare_fetcher, _tushare_fetcher],
+        source_names=["akshare", "tushare"],
+        cache_ttl_hours=24,
+    )
+    if result is not None:
+        return result
+    default_item = {
+        "net_income": 0,
+        "operating_revenue": 0,
+        "operating_profit": 0,
+        "working_capital": 0,
+        "depreciation_and_amortization": 0,
+        "capital_expenditure": 0,
+        "free_cash_flow": 0
+    }
+    return [default_item, default_item]
 
 
 def get_market_data(
@@ -731,28 +698,31 @@ def get_market_data(
     market_cap: Optional[float] = None,
 ) -> Dict[str, Any]:
     """获取市场数据"""
-    try:
+    cache_key = f"market_data:{symbol}"
+
+    def _akshare_fetcher():
         snapshot = {
             "market_cap": market_cap,
             "data_source": "financial_metrics" if market_cap is not None else "unavailable",
         }
         if market_cap is None:
             snapshot = _fetch_market_snapshot(symbol)
-        if price_history is None:
-            price_history = get_price_history(symbol)
+        local_price_history = price_history
+        if local_price_history is None:
+            local_price_history = get_price_history(symbol)
 
-        if price_history is None or price_history.empty:
+        if local_price_history is None or local_price_history.empty:
             latest_volume = None
             avg_volume = None
             high_52w = None
             low_52w = None
         else:
-            latest_volume = _safe_float(price_history["volume"].iloc[-1], 0.0)
-            avg_volume = _safe_float(price_history["volume"].tail(20).mean(), 0.0)
-            high_52w = _safe_float(price_history["high"].max())
-            low_52w = _safe_float(price_history["low"].min())
+            latest_volume = _safe_float(local_price_history["volume"].iloc[-1], 0.0)
+            avg_volume = _safe_float(local_price_history["volume"].tail(20).mean(), 0.0)
+            high_52w = _safe_float(local_price_history["high"].max())
+            low_52w = _safe_float(local_price_history["low"].min())
 
-        return {
+        result = {
             "market_cap": snapshot.get("market_cap"),
             "volume": latest_volume,
             "average_volume": avg_volume,
@@ -760,19 +730,29 @@ def get_market_data(
             "fifty_two_week_low": low_52w,
             "_data_source": {
                 "snapshot": snapshot.get("data_source"),
-                "price_history": getattr(price_history, "attrs", {}).get("data_source", "unavailable"),
+                "price_history": getattr(local_price_history, "attrs", {}).get("data_source", "unavailable"),
             },
             "_status": "ok" if any(
                 value is not None for value in [snapshot.get("market_cap"), latest_volume, high_52w, low_52w]
             ) else "unavailable",
         }
+        if result["_status"] == "unavailable":
+            return None
+        return result
 
-    except Exception as e:
-        logger.error(f"获取市场数据出错: {e}")
-        return {
-            "_status": "unavailable",
-            "_error": str(e),
-        }
+    dsm = DataSourceManager()
+    result = dsm.fetch_with_fallback(
+        cache_key=cache_key,
+        fetchers=[_akshare_fetcher],
+        source_names=["akshare"],
+        cache_ttl_hours=1,
+    )
+    if result is not None:
+        return result
+    return {
+        "_status": "unavailable",
+        "_error": "所有数据源均失败",
+    }
 
 
 def get_price_history(symbol: str, start_date: str = None, end_date: str = None, adjust: str = "qfq") -> pd.DataFrame:
@@ -814,41 +794,47 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
         - skewness: 偏度
         - kurtosis: 峰度
     """
-    try:
-        # 获取当前日期和昨天的日期
-        current_date = datetime.now()
-        yesterday = current_date - timedelta(days=1)
+    current_date = datetime.now()
+    yesterday = current_date - timedelta(days=1)
 
-        # 如果没有提供日期，默认使用昨天作为结束日期
-        if not end_date:
-            end_date = yesterday  # 使用昨天作为结束日期
-        else:
-            end_date = datetime.strptime(end_date, "%Y-%m-%d")
-            # 确保end_date不会超过昨天
-            if end_date > yesterday:
-                end_date = yesterday
+    if not end_date:
+        resolved_end_date = yesterday
+    else:
+        resolved_end_date = datetime.strptime(end_date, "%Y-%m-%d")
+        if resolved_end_date > yesterday:
+            resolved_end_date = yesterday
 
-        if not start_date:
-            start_date = end_date - timedelta(days=365)  # 默认获取一年的数据
-        else:
-            start_date = datetime.strptime(start_date, "%Y-%m-%d")
+    if not start_date:
+        resolved_start_date = resolved_end_date - timedelta(days=365)
+    else:
+        resolved_start_date = datetime.strptime(start_date, "%Y-%m-%d")
 
-        logger.info(f"\n正在获取 {symbol} 的价格历史...")
-        logger.info(f"开始日期: {start_date.strftime('%Y-%m-%d')}")
-        logger.info(f"结束日期: {end_date.strftime('%Y-%m-%d')}")
+    start_str = resolved_start_date.strftime('%Y-%m-%d')
+    end_str = resolved_end_date.strftime('%Y-%m-%d')
 
+    logger.info(f"\n正在获取 {symbol} 的价格历史...")
+    logger.info(f"开始日期: {start_str}")
+    logger.info(f"结束日期: {end_str}")
+
+    cache_key = f"price_history:{symbol}:{start_str}:{end_str}:{adjust}"
+
+    if resolved_end_date < (current_date - timedelta(days=7)):
+        ttl = 8760
+    else:
+        ttl = 4
+
+    def _akshare_fetcher():
         normalized_symbol = _normalize_ak_symbol(symbol)
 
-        def get_and_process_data(start_date, end_date):
-            """获取并处理数据，包括多数据源降级。"""
+        def get_and_process_data(sd, ed):
             fetchers = [
                 (
                     "eastmoney",
                     lambda: ak.stock_zh_a_hist(
                         symbol=symbol,
                         period="daily",
-                        start_date=start_date.strftime("%Y%m%d"),
-                        end_date=end_date.strftime("%Y%m%d"),
+                        start_date=sd.strftime("%Y%m%d"),
+                        end_date=ed.strftime("%Y%m%d"),
                         adjust=adjust,
                     ),
                     15,
@@ -857,8 +843,8 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
                     "sina",
                     lambda: ak.stock_zh_a_daily(
                         symbol=normalized_symbol,
-                        start_date=start_date.strftime("%Y%m%d"),
-                        end_date=end_date.strftime("%Y%m%d"),
+                        start_date=sd.strftime("%Y%m%d"),
+                        end_date=ed.strftime("%Y%m%d"),
                         adjust=adjust,
                     ),
                     15,
@@ -867,8 +853,8 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
                     "tencent",
                     lambda: ak.stock_zh_a_hist_tx(
                         symbol=normalized_symbol,
-                        start_date=start_date.strftime("%Y%m%d"),
-                        end_date=end_date.strftime("%Y%m%d"),
+                        start_date=sd.strftime("%Y%m%d"),
+                        end_date=ed.strftime("%Y%m%d"),
                         adjust=adjust,
                     ),
                     15,
@@ -884,46 +870,31 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
                 return pd.DataFrame()
             return _standardize_price_dataframe(result, source_name)
 
-        # 获取历史行情数据
-        df = get_and_process_data(start_date, end_date)
+        sd, ed = resolved_start_date, resolved_end_date
+        df = get_and_process_data(sd, ed)
 
         if df is None or df.empty:
-            logger.warning(
-                f"警告: 未找到 {symbol} 的价格历史数据")
-            return pd.DataFrame()
+            return None
 
-        # 检查数据量是否足够
-        min_required_days = 120  # 至少需要120个交易日的数据
+        min_required_days = 120
         if len(df) < min_required_days:
-            logger.warning(
-                f"警告: 数据不足 ({len(df)} 天) 无法计算所有技术指标")
+            logger.warning(f"警告: 数据不足 ({len(df)} 天) 无法计算所有技术指标")
             logger.info("尝试获取更多数据...")
-
-            # 扩大时间范围到2年
-            start_date = end_date - timedelta(days=730)
-            df = get_and_process_data(start_date, end_date)
-
+            sd = ed - timedelta(days=730)
+            df = get_and_process_data(sd, ed)
             if len(df) < min_required_days:
-                logger.warning(
-                    f"警告: 即使扩展时间范围，数据仍不足 ({len(df)} 天)")
+                logger.warning(f"警告: 即使扩展时间范围，数据仍不足 ({len(df)} 天)")
 
-        # 计算动量指标
-        df["momentum_1m"] = df["close"].pct_change(periods=20)  # 20个交易日约等于1个月
-        df["momentum_3m"] = df["close"].pct_change(periods=60)  # 60个交易日约等于3个月
-        df["momentum_6m"] = df["close"].pct_change(
-            periods=120)  # 120个交易日约等于6个月
+        df["momentum_1m"] = df["close"].pct_change(periods=20)
+        df["momentum_3m"] = df["close"].pct_change(periods=60)
+        df["momentum_6m"] = df["close"].pct_change(periods=120)
 
-        # 计算成交量动量（相对于20日平均成交量的变化）
         df["volume_ma20"] = df["volume"].rolling(window=20).mean()
         df["volume_momentum"] = df["volume"] / df["volume_ma20"]
 
-        # 计算波动率指标
-        # 1. 历史波动率 (20日)
         returns = df["close"].pct_change()
-        df["historical_volatility"] = returns.rolling(
-            window=20).std() * np.sqrt(252)  # 年化
+        df["historical_volatility"] = returns.rolling(window=20).std() * np.sqrt(252)
 
-        # 2. 波动率区间 (相对于过去120天的波动率的位置)
         volatility_120d = returns.rolling(window=120).std() * np.sqrt(252)
         vol_min = volatility_120d.rolling(window=120).min()
         vol_max = volatility_120d.rolling(window=120).max()
@@ -931,16 +902,13 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
         df["volatility_regime"] = np.where(
             vol_range > 0,
             (df["historical_volatility"] - vol_min) / vol_range,
-            0  # 当范围为0时返回0
+            0
         )
 
-        # 3. 波动率Z分数
         vol_mean = df["historical_volatility"].rolling(window=120).mean()
         vol_std = df["historical_volatility"].rolling(window=120).std()
-        df["volatility_z_score"] = (
-            df["historical_volatility"] - vol_mean) / vol_std
+        df["volatility_z_score"] = (df["historical_volatility"] - vol_mean) / vol_std
 
-        # 4. ATR比率
         tr = pd.DataFrame()
         tr["h-l"] = df["high"] - df["low"]
         tr["h-pc"] = abs(df["high"] - df["close"].shift(1))
@@ -949,97 +917,93 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
         df["atr"] = tr["tr"].rolling(window=14).mean()
         df["atr_ratio"] = df["atr"] / df["close"]
 
-        # 计算统计套利指标
-        # 1. 赫斯特指数 (使用过去120天的数据)
         def calculate_hurst(series):
-            """
-            计算Hurst指数。
-
-            Args:
-                series: 价格序列
-
-            Returns:
-                float: Hurst指数，或在计算失败时返回np.nan
-            """
             try:
                 series = series.dropna()
-                if len(series) < 30:  # 降低最小数据点要求
+                if len(series) < 30:
                     return np.nan
-
-                # 使用对数收益率
                 log_returns = np.log(series / series.shift(1)).dropna()
-                if len(log_returns) < 30:  # 降低最小数据点要求
+                if len(log_returns) < 30:
                     return np.nan
-
-                # 使用更小的lag范围
-                # 减少lag范围到2-10天
                 lags = range(2, min(11, len(log_returns) // 4))
-
-                # 计算每个lag的标准差
                 tau = []
                 for lag in lags:
-                    # 计算滚动标准差
                     std = log_returns.rolling(window=lag).std().dropna()
                     if len(std) > 0:
                         tau.append(np.mean(std))
-
-                # 基本的数值检查
-                if len(tau) < 3:  # 进一步降低最小要求
+                if len(tau) < 3:
                     return np.nan
-
-                # 使用对数回归
                 lags_log = np.log(list(lags))
                 tau_log = np.log(tau)
-
-                # 计算回归系数
                 reg = np.polyfit(lags_log, tau_log, 1)
                 hurst = reg[0] / 2.0
-
-                # 只保留基本的数值检查
                 if np.isnan(hurst) or np.isinf(hurst):
                     return np.nan
-
                 return hurst
-
-            except Exception as e:
+            except Exception:
                 return np.nan
 
-        # 使用对数收益率计算Hurst指数
         log_returns = np.log(df["close"] / df["close"].shift(1))
         df["hurst_exponent"] = log_returns.rolling(
-            window=120,
-            min_periods=60  # 要求至少60个数据点
+            window=120, min_periods=60
         ).apply(calculate_hurst)
 
-        # 2. 偏度 (20日)
         df["skewness"] = returns.rolling(window=20).skew()
-
-        # 3. 峰度 (20日)
         df["kurtosis"] = returns.rolling(window=20).kurt()
 
-        # 按日期升序排序
         df = df.sort_values("date")
-
-        # 重置索引
         df = df.reset_index(drop=True)
 
-        logger.info(
-            f"成功获取价格历史数据 ({len(df)} 条记录)")
+        logger.info(f"成功获取价格历史数据 ({len(df)} 条记录)")
         logger.info(f"价格历史数据来源 {symbol}: {df.attrs.get('data_source', 'unknown')}")
 
-        # 检查并报告NaN值
         nan_columns = df.isna().sum()
         if nan_columns.any():
-            logger.warning(
-                "\n警告: 以下指标包含 NaN 值:")
+            logger.warning("\n警告: 以下指标包含 NaN 值:")
             for col, nan_count in nan_columns[nan_columns > 0].items():
                 logger.warning(f"- {col}: {nan_count} 条记录")
 
-        return df
+        df.attrs["data_source"] = df.attrs.get("data_source", "akshare")
+        return df.to_dict(orient="records")
 
-    except Exception as e:
-        logger.error(f"获取价格历史出错: {e}")
-        return pd.DataFrame()
+    def _tushare_fetcher():
+        result = data_fetchers.fetch_price_history_tushare(
+            symbol, start_str, end_str, adjust
+        )
+        if result is None:
+            return None
+        df = _standardize_price_dataframe(pd.DataFrame(result), "tushare")
+        if df.empty:
+            return None
+        df.attrs["data_source"] = "tushare"
+        return df.to_dict(orient="records")
+
+    def _baostock_fetcher():
+        result = data_fetchers.fetch_price_history_baostock(
+            symbol, start_str, end_str, adjust
+        )
+        if result is None:
+            return None
+        df = _standardize_price_dataframe(pd.DataFrame(result), "baostock")
+        if df.empty:
+            return None
+        df.attrs["data_source"] = "baostock"
+        return df.to_dict(orient="records")
+
+    dsm = DataSourceManager()
+    result = dsm.fetch_with_fallback(
+        cache_key=cache_key,
+        fetchers=[_akshare_fetcher, _tushare_fetcher, _baostock_fetcher],
+        source_names=["akshare", "tushare", "baostock"],
+        cache_ttl_hours=ttl,
+    )
+
+    if result is not None:
+        df = pd.DataFrame(result)
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+        return df
+    return pd.DataFrame()
 
 
 def prices_to_df(prices):

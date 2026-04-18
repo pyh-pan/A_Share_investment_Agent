@@ -164,6 +164,7 @@ def sentiment_agent(state: AgentState):
                 "signal": message_content["signal"],
                 "confidence": message_content["confidence"],
             },
+            "sentiment_report": message_content,
         },
         "metadata": state["metadata"],
     }

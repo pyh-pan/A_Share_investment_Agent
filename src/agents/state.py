@@ -12,12 +12,33 @@ logger = setup_logger('agent_state')
 def merge_dicts(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
     return {**a, **b}
 
+
+def merge_dicts_deep(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep merge dicts: nested dicts are recursively merged, non-dict values overwritten.
+
+    This replaces merge_dicts for state["data"] so that nested sub-states
+    (e.g. debate_state, technical_report) are merged incrementally rather
+    than replaced wholesale by the last writer.
+
+    Example:
+        a = {"debate_state": {"round_count": 1, "bull_history": "B1"}}
+        b = {"debate_state": {"round_count": 2, "bear_history": "R1"}}
+        result = {"debate_state": {"round_count": 2, "bull_history": "B1", "bear_history": "R1"}}
+    """
+    result = {**a}
+    for key, value in b.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = merge_dicts_deep(result[key], value)
+        else:
+            result[key] = value
+    return result
+
 # Define agent state
 
 
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], operator.add]
-    data: Annotated[Dict[str, Any], merge_dicts]
+    data: Annotated[Dict[str, Any], merge_dicts_deep]
     metadata: Annotated[Dict[str, Any], merge_dicts]
 
 

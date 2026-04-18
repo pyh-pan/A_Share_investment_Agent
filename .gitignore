@@ -78,5 +78,8 @@ temp/
 # macro analysis
 src/data/macro_analysis_cache.json
 
+# ChromaDB memory persistence
+src/data/memory/
+
 src/crawler/*.ts
 *.json

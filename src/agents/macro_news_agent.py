@@ -195,7 +195,7 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
     # f"--- DEBUG: macro_news_agent RETURN messages: {[msg.name for msg in [new_message]]} ---")
     return {
         "messages": [new_message],
-        "data": {**state["data"], "macro_news_analysis_result": summary},
+        "data": {**state["data"], "macro_news_analysis_result": summary, "macro_news_report": summary},
         "metadata": {
             **state["metadata"],
             f"{agent_name}_details": agent_details_for_metadata

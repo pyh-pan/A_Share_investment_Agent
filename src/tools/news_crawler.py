@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 import pandas as pd
 from urllib.parse import urlparse
 from src.tools.openrouter_config import get_chat_completion, logger as api_logger
-from src.tools.http_client import smart_get
+from src.tools.http_client import smart_get, smart_post
 
 # 导入新的搜索模块
 try:
@@ -209,6 +209,69 @@ def _fetch_news_from_eastmoney(symbol: str, max_news: int = 100) -> list:
         return news_list[:max_news]
     except Exception as e:
         print(f"东方财富搜索API获取新闻失败: {e}")
+        return []
+
+
+def _fetch_news_from_eastmoney_direct(symbol: str, max_news: int = 50) -> list:
+    """Direct Eastmoney news API via smart_post (bypasses akshare, uses rate-limited HTTP client)."""
+    try:
+        url = "https://search-api-web.eastmoney.com/search/jsonp"
+        params = {
+            "cb": "jQuery",
+            "param": json.dumps({
+                "uid": "",
+                "keyword": symbol,
+                "type": ["cmsArticleWebOld"],
+                "client": "web",
+                "clientType": "web",
+                "clientVersion": "curr",
+                "param": {
+                    "cmsArticleWebOld": {
+                        "searchScope": "default",
+                        "sort": "default",
+                        "pageIndex": 1,
+                        "pageSize": max_news,
+                        "preTag": "",
+                        "postTag": "",
+                    }
+                },
+            }, ensure_ascii=False),
+        }
+        response = smart_get(url, params=params, timeout=10)
+        response.raise_for_status()
+
+        text = response.text.strip()
+        if not text:
+            return []
+
+        # Robust JSONP parsing: find outermost parentheses
+        json_str = text[text.index("(") + 1 : text.rindex(")")]
+        data = json.loads(json_str)
+        raw = data.get("result", {}).get("cmsArticleWebOld", [])
+        # API versions differ: sometimes a list directly, sometimes {list: [...]}
+        if isinstance(raw, dict):
+            articles = raw.get("list", [])
+        else:
+            articles = raw
+
+        import re
+        news_items = []
+        for article in articles[:max_news]:
+            title = re.sub(r"</?em>", "", article.get("title", "")).strip()
+            if not title:
+                continue
+            news_items.append({
+                "title": title,
+                "content": re.sub(r"</?em>", "", article.get("content", ""))[:400],
+                "publish_time": article.get("date", ""),
+                "source": article.get("mediaName", "eastmoney_direct").strip() or "eastmoney_direct",
+                "url": article.get("url", "").strip(),
+                "keyword": symbol,
+            })
+        print(f"东方财富直连API获取到 {len(news_items)} 条新闻")
+        return news_items
+    except Exception as e:
+        print(f"东方财富直连API失败: {e}")
         return []
 
 
@@ -585,13 +648,17 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
 
     print(f'开始获取{symbol}的新闻数据...')
 
+    # === 第零梯队：东方财富直连API（最高优先级，使用增强HTTP客户端） ===
+    print("第零梯队：东方财富直连API...")
+    em_direct_news = _fetch_news_from_eastmoney_direct(symbol, max_news)
+
     # === 第一梯队：专业财经三源（东方财富 + 新浪 + 同花顺） ===
     print("第一梯队：尝试东方财富 + 新浪财经 + 同花顺...")
     eastmoney_news = _fetch_news_from_eastmoney(symbol, max_news)
     sina_news = _fetch_news_from_sina(symbol, max_news)
     ths_news = _fetch_news_from_10jqka(symbol, max_news)
-    new_news_list = merge_and_deduplicate(eastmoney_news, sina_news, ths_news)
-    fetch_method = "eastmoney+sina+10jqka"
+    new_news_list = merge_and_deduplicate(em_direct_news, eastmoney_news, sina_news, ths_news)
+    fetch_method = "eastmoney_direct+eastmoney+sina+10jqka"
 
     if len(new_news_list) >= max_news * 0.5:
         print(f"第一梯队获取到 {len(new_news_list)} 条新闻，满足需求")

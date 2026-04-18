@@ -58,6 +58,19 @@ set_global_log_storage(log_storage)
 sys.stdout = OutputLogger()
 logger = setup_logger('main_workflow')
 
+MAX_DEBATE_ROUNDS = 5
+
+
+def should_continue_debate(state):
+    debate_state = state.get("data", {}).get("debate_state", {})
+    round_count = debate_state.get("round_count", 0)
+    if round_count >= MAX_DEBATE_ROUNDS * 2:
+        return "debate_room_agent"
+    current_response = debate_state.get("current_response", "")
+    if current_response.startswith("[Round") and "Bull" in current_response:
+        return "researcher_bear_agent"
+    return "researcher_bull_agent"
+
 # --- Run the Hedge Fund Workflow ---
 
 
@@ -142,36 +155,28 @@ workflow.add_edge("market_data_agent", "technical_analyst_agent")
 workflow.add_edge("market_data_agent", "fundamentals_agent")
 workflow.add_edge("market_data_agent", "sentiment_agent")
 workflow.add_edge("market_data_agent", "valuation_agent")
-# macro_news_agent 也从 market_data_agent 并行出来
 workflow.add_edge("market_data_agent", "macro_news_agent")
 
-# Main analysis path (technical, fundamentals, sentiment, valuation -> researchers -> ... -> macro_analyst)
 workflow.add_edge("technical_analyst_agent", "researcher_bull_agent")
 workflow.add_edge("fundamentals_agent", "researcher_bull_agent")
 workflow.add_edge("sentiment_agent", "researcher_bull_agent")
 workflow.add_edge("valuation_agent", "researcher_bull_agent")
+workflow.add_edge("macro_news_agent", "researcher_bull_agent")
 
-workflow.add_edge("technical_analyst_agent", "researcher_bear_agent")
-workflow.add_edge("fundamentals_agent", "researcher_bear_agent")
-workflow.add_edge("sentiment_agent", "researcher_bear_agent")
-workflow.add_edge("valuation_agent", "researcher_bear_agent")
-
-workflow.add_edge("researcher_bull_agent", "debate_room_agent")
-workflow.add_edge("researcher_bear_agent", "debate_room_agent")
+workflow.add_conditional_edges("researcher_bull_agent", should_continue_debate, {
+    "researcher_bear_agent": "researcher_bear_agent",
+    "debate_room_agent": "debate_room_agent",
+})
+workflow.add_conditional_edges("researcher_bear_agent", should_continue_debate, {
+    "researcher_bull_agent": "researcher_bull_agent",
+    "debate_room_agent": "debate_room_agent",
+})
 
 workflow.add_edge("debate_room_agent", "risk_management_agent")
 workflow.add_edge("risk_management_agent", "macro_analyst_agent")
 
-# Edges to portfolio_management_agent (汇聚点)
-# macro_analyst_agent (end of main analysis path) and macro_news_agent (parallel news path)
-# both feed into portfolio_management_agent.
-# LangGraph will wait for both parent nodes to complete before running portfolio_management_agent.
-workflow.add_edge("macro_news_agent", "researcher_bull_agent")
-workflow.add_edge("macro_news_agent", "researcher_bear_agent")
-
 workflow.add_edge("macro_analyst_agent", "portfolio_management_agent")
 
-# Final node
 workflow.add_edge("portfolio_management_agent", END)
 
 app = workflow.compile()

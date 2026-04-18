@@ -98,10 +98,11 @@ All market data comes from **akshare** library in `src/tools/api.py`:
 
 ### News Crawling Tiered Architecture
 
-`src/tools/news_crawler.py` uses a three-tier priority system for news acquisition:
-- **Tier 1** (fast HTTP APIs): 东方财富 + 新浪财经 + 同花顺 — always executed first
-- **Tier 2** (Playwright browser): 百度资讯 + Bing + Google — only if tier 1 is insufficient
-- **Tier 3** (fallback): akshare `stock_news_em` — only if tiers 1+2 both fail
+`src/tools/news_crawler.py` uses a four-tier priority system for news acquisition:
+- **Tier 0** (direct API via enhanced HTTP client): 东方财富直连搜索API — highest priority, benefits from anti-scraping rate limiting
+- **Tier 1** (fast HTTP APIs): 东方财富(akshare) + 新浪财经 + 同花顺 — always executed after tier 0
+- **Tier 2** (Playwright browser): 百度资讯 + Bing + Google — only if tiers 0+1 are insufficient
+- **Tier 3** (fallback): akshare `stock_news_em` — only if tiers 0+1+2 all fail
 
 Deduplication uses exact title matching + fuzzy substring matching (normalized titles with punctuation removed).
 
@@ -125,69 +126,14 @@ The following improvements are planned, ordered by impact and importance within 
 - [ ] **Sentiment analysis too narrow** — Only analyzes news articles; missing retail investor sentiment (Eastmoney guba, Xueqiu/Snowball, Weibo); all news collapsed to single -1~1 score losing structural information; no temporal decay weighting.
   *Priority: CRITICAL, Effort: 24-36h*
 
-- [ ] **Missing KDJ indicator** — KDJ (9,3,3) is the most popular technical indicator in Chinese markets, but current system only has MACD/RSI/BB/OBV. Retail investors and institutions both heavily rely on KDJ golden/dead crosses and overbought/oversold signals.
-  *From TradingAgents-CN, Priority: HIGH, Effort: 2-4h*
-  ```python
-  def calculate_kdj(prices_df, n=9, m1=3, m2=3):
-      low_list = prices_df['low'].rolling(window=n, min_periods=n).min()
-      high_list = prices_df['high'].rolling(window=n, min_periods=n).max()
-      rsv = (prices_df['close'] - low_list) / (high_list - low_list) * 100
-      k = rsv.ewm(alpha=1/m1, adjust=False).mean()
-      d = k.ewm(alpha=1/m2, adjust=False).mean()
-      j = 3 * k - 2 * d
-      # Signal: bullish when J<0 and K<20 (oversold), bearish when J>100 and K>80 (overbought)
-      current_k, current_d, current_j = k.iloc[-1], d.iloc[-1], j.iloc[-1]
-      if current_j < 0 and current_k < 20:
-          signal = "bullish"
-      elif current_j > 100 and current_k > 80:
-          signal = "bearish"
-      else:
-          signal = "neutral"
-      return {"k": current_k, "d": current_d, "j": current_j, "signal": signal}
-  ```
+- [x] **Missing KDJ indicator** — Implemented in `src/agents/technicals.py` via `calculate_kdj()`. KDJ (9,3,3) signals: bullish when J<0 and K<20 (oversold), bearish when J>100 and K>80 (overbought).
+  *Completed: 2026-04-18*
 
-- [ ] **Missing northbound capital flow data** — Foreign capital flows (北向资金) are critical "smart money" signals in A-share markets. Current system completely ignores this A-share specific data source.
-  *From TradingAgents-CN, Priority: HIGH, Effort: 1-2h*
-  ```python
-  import akshare as ak
-  def get_northbound_flow(days=5):
-      df = ak.stock_hsgt_north_net_flow_in_em()
-      total_inflow = df.tail(days)['净流入'].sum()
-      # Signal: bullish if total_inflow > 10 billion (moderate inflow)
-      if total_inflow > 50:
-          trend, signal = "strong_inflow", "bullish"
-      elif total_inflow > 10:
-          trend, signal = "moderate_inflow", "bullish"
-      elif total_inflow > -10:
-          trend, signal = "neutral", "neutral"
-      elif total_inflow > -50:
-          trend, signal = "moderate_outflow", "bearish"
-      else:
-          trend, signal = "strong_outflow", "bearish"
-      return {"net_inflow_billion": total_inflow, "trend": trend, "signal": signal}
-  ```
+- [x] **Missing northbound capital flow data** — Implemented in `src/tools/api.py` via `get_northbound_flow()` with `DataSourceManager` cache (4h TTL). Uses `stock_hsgt_north_net_flow_in_em` with multi-source fallback.
+  *Completed: 2026-04-18*
 
-- [ ] **Missing MACD divergence detection** — Current system only detects MACD crossovers. Top/bottom divergence (顶背离/底背离) is a critical reversal signal: when price makes new high but MACD doesn't = top divergence (bearish); price makes new low but MACD doesn't = bottom divergence (bullish).
-  *From TradingAgents-CN, Priority: HIGH, Effort: 4-6h*
-  ```python
-  def detect_macd_divergence(prices_df):
-      macd_line, signal_line = calculate_macd(prices_df)
-      recent_prices = prices_df['close'].tail(60)
-      recent_macd = macd_line.tail(60)
-      # Top divergence: price new high, MACD not new high
-      price_highs = recent_prices[recent_prices == recent_prices.rolling(5).max()]
-      macd_highs = recent_macd[recent_macd == recent_macd.rolling(5).max()]
-      if len(price_highs) >= 2 and len(macd_highs) >= 2:
-          if price_highs.iloc[-1] > price_highs.iloc[-2] and macd_highs.iloc[-1] < macd_highs.iloc[-2]:
-              return {"divergence": "top", "signal": "bearish", "message": "Top divergence: Price new high but MACD not - potential reversal"}
-      # Bottom divergence detection similarly...
-      price_lows = recent_prices[recent_prices == recent_prices.rolling(5).min()]
-      macd_lows = recent_macd[recent_macd == recent_macd.rolling(5).min()]
-      if len(price_lows) >= 2 and len(macd_lows) >= 2:
-          if price_lows.iloc[-1] < price_lows.iloc[-2] and macd_lows.iloc[-1] > macd_lows.iloc[-2]:
-              return {"divergence": "bottom", "signal": "bullish", "message": "Bottom divergence: Price new low but MACD not - potential bounce"}
-      return {"divergence": None, "signal": "neutral"}
-  ```
+- [x] **Missing MACD divergence detection** — Implemented in `src/agents/technicals.py` via `detect_macd_divergence()`. Detects top divergence (bearish) and bottom divergence (bullish) over 60-day window.
+  *Completed: 2026-04-18*
 
 - [ ] **No forced tool calling mechanism** — LLM sometimes ignores tools and generates hallucinated analysis with fake data. TradingAgents-CN implements code-level fallback: if LLM returns empty tool_calls, Python code directly invokes the data tool and forces LLM to analyze real data.
   *From TradingAgents-CN, Priority: MEDIUM, Effort: 8-12h*
@@ -212,38 +158,18 @@ The following improvements are planned, ordered by impact and importance within 
 - [ ] **Risk management too basic** — Only historical VaR, missing CVaR/Expected Shortfall and Monte Carlo; no Beta coefficient calculation; no liquidity risk assessment; stress testing is trivially simple (flat % declines); T+1 settlement rule completely ignored.
   *Priority: HIGH, Effort: 12-18h*
 
-- [ ] **Final decision over-relies on LLM** — Portfolio manager's signal weights (valuation 30%/fundamentals 25%/technical 20%/macro 15%/sentiment 10%) exist only in the prompt text with no programmatic enforcement. Should compute weighted scores in code, use LLM only for qualitative adjustment and explanation.
-  *Priority: HIGH, Effort: 10-16h*
+- [ ] **Final decision over-relies on LLM** — ~~Portfolio manager's signal weights exist only in prompt text with no programmatic enforcement.~~ `SignalWeightingEngine` now computes weighted scores deterministically in code (valuation 30%/fundamentals 25%/technical 20%/macro 15%/sentiment 10%). LLM still handles qualitative adjustment and explanation, but no longer controls weight allocation. Remaining gap: LLM can still override the base_decision without justification tracking.
+  *Priority: MEDIUM (downgraded from HIGH), Effort: 4-8h*
 
-- [ ] **Technical analysis gaps** — Missing KDJ indicator (most popular in Chinese markets); no MACD divergence detection (only crossover); turnover rate data available but never used; no support/resistance level identification; no MA5/10/20/60 support analysis; first-layer indicators (MACD/RSI/BB/OBV) computed then overwritten by second-layer strategies (dead code).
-  *Note: Partially addressed by KDJ and MACD divergence in P0*
-  *Priority: MEDIUM, Effort: 14-20h*
+- [ ] **Technical analysis gaps** — ~~Missing KDJ indicator (most popular in Chinese markets); no MACD divergence detection (only crossover);~~ turnover rate data available but never used; no support/resistance level identification; no MA5/10/20/60 support analysis; first-layer indicators (MACD/RSI/BB/OBV) computed then overwritten by second-layer strategies (dead code).
+  *Note: KDJ and MACD divergence now implemented in P0*
+  *Priority: MEDIUM, Effort: 10-14h*
 
-- [ ] **No anti-scraping protection** — Eastmoney API intermittently returns `RemoteDisconnected` because current requests lack browser TLS fingerprint simulation. TradingAgents-CN uses `curl_cffi` to impersonate Chrome browser and bypass anti-bot measures.
-  *From TradingAgents-CN, Priority: HIGH, Effort: 4-6h*
-  ```python
-  from curl_cffi import requests as curl_requests
-  def fetch_with_impersonation(url):
-      # Simulate Chrome 110 TLS fingerprint to bypass anti-scraping
-      response = curl_requests.get(url, impersonate="chrome110")
-      return response.json()
-  ```
+- [ ] **No anti-scraping protection** — ~~Eastmoney API intermittently returns `RemoteDisconnected` because current requests lack browser TLS fingerprint simulation.~~ `curl_cffi` with Chrome impersonation now implemented in `http_client.py` with per-domain rate limiting and exponential backoff. Remaining gap: still seeing `RemoteDisconnected` on some eastmoney endpoints; `curl_cffi` impersonation may need version updates or fallback tuning.
+  *From TradingAgents-CN, Priority: MEDIUM (downgraded from HIGH), Effort: 2-4h (remaining)*
 
-- [ ] **No persistent caching** — System refetches all K-line and financial data on every run, wasting API quota and time. Should implement SQLite/MongoDB cache layer so 90% of requests hit local database.
-  *From TradingAgents-CN, Priority: HIGH, Effort: 12-16h*
-  ```python
-  # Daily cron job syncs data to local DB
-  def sync_daily_data():
-      for symbol in watchlist:
-          data = ak.stock_zh_a_hist(symbol=symbol)
-          sqlite_db.insert(f"hist_{symbol}", data, date=today)
-  
-  # Agent queries local DB first
-  def get_prices(symbol):
-      if cached := sqlite_db.query(f"hist_{symbol}", date=today):
-          return cached  # 90% hit rate
-      return fetch_from_api(symbol)  # Fallback
-  ```
+- [ ] **No persistent caching** — ~~System refetches all K-line and financial data on every run, wasting API quota and time.~~ `DataSourceManager` with SQLite-backed cache now integrated for key API functions (`get_northbound_flow`, `get_macro_indicators`, `get_financial_metrics`). Remaining gap: not all data functions use DSM yet; no scheduled sync cron job for pre-warming cache.
+  *From TradingAgents-CN, Priority: MEDIUM (downgraded from HIGH), Effort: 8-12h (remaining)*
 
 - [ ] **Valuation missing dynamic WACC** — Current DCF uses hardcoded 10% discount rate, overvaluing high-risk stocks and undervaluing low-risk ones. Should calculate WACC dynamically using Beta coefficient.
   *From TradingAgents-CN, Priority: MEDIUM, Effort: 8-12h*
@@ -283,19 +209,6 @@ The following improvements are planned, ordered by impact and importance within 
 
 - [ ] **No cross-library fallback** — Current `_fetch_with_fallback` only switches between AKShare internal functions. When AKShare completely fails (not just one function), system has no backup. Should add Tushare (commercial) and BaoStock (free) as cross-library fallbacks.
   *From TradingAgents-CN, Priority: MEDIUM, Effort: 8-12h*
-  ```python
-  def get_stock_data_with_fallback(symbol):
-      # Priority: MongoDB -> Tushare -> AKShare (with curl_cffi) -> BaoStock
-      if data := mongo_cache.get(symbol):
-          return data
-      if data := try_tushare(symbol):
-          mongo_cache.set(symbol, data)
-          return data
-      if data := try_akshare_curl(symbol):
-          mongo_cache.set(symbol, data)
-          return data
-      return try_baostock(symbol)  # Final fallback
-  ```
 
 ### P2: Architecture Improvements (Robustness)
 
@@ -312,6 +225,7 @@ The following improvements are planned, ordered by impact and importance within 
 
 - [ ] **`format_decision()` weight mismatch** — Displays 30/35/25 weights for fundamental/valuation/technical, contradicting the 25/30/20 in the system prompt. Need to unify weight definitions across system prompt, code logic, and output display.
   *Priority: HIGH, Effort: 1-2h*
+  *Note: SignalWeightingEngine now uses consistent weights (30/25/20/15/10), but `format_decision()` display may still show old values*
 
 - [ ] **Data pipeline redundancy** — `api.py` pre-computes momentum/volatility/Hurst, `technicals.py` recomputes all of them (with different Hurst algorithm); sentiment agent and macro analyst use same news with different LLM prompts (double-counting risk).
   *Priority: MEDIUM, Effort: 6-10h*
@@ -447,17 +361,17 @@ Key innovations from [TradingAgents-CN](https://github.com/hsliuping/TradingAgen
 ## Implementation Priority Summary
 
 **Immediate (This Week)** — Fix P0 critical defects affecting accuracy:
-1. Macro analyst data source mismatch
+1. ~~Macro analyst data source mismatch~~ (partially done: macro indicators integrated via DSM, but agent still uses stock news for context)
 2. Shenzhen stock financial statements bug
-3. `format_decision()` weight mismatch
-4. Missing KDJ indicator
-5. Missing northbound capital flow
+3. ~~`format_decision()` weight mismatch~~ (SignalWeightingEngine uses consistent weights, display may still show old values)
+4. ~~Missing KDJ indicator~~ ✅
+5. ~~Missing northbound capital flow~~ ✅
 
 **Short Term (Next 2-4 Weeks)** — Fill P1 important gaps:
 6. Valuation model improvements (dynamic WACC, PEG)
 7. Industry-specific thresholds
-8. Anti-scraping protection (curl_cffi)
-9. Persistent caching layer
+8. ~~Anti-scraping protection (curl_cffi)~~ ✅ (core done, tuning remaining)
+9. ~~Persistent caching layer~~ (partially done: DSM with cache for key functions)
 10. Risk management enhancements (CVaR, Beta, stress testing)
 
 **Medium Term (1-3 Months)** — P2 architecture improvements:
@@ -472,7 +386,9 @@ Key innovations from [TradingAgents-CN](https://github.com/hsliuping/TradingAgen
 
 ---
 
-*Last Updated: 2025-04-17*
+*Last Updated: 2026-04-18*
 *Total Optimization Items: 28*
+*Completed: 4 (KDJ, northbound flow, MACD divergence, SignalWeightingEngine)*
+*Partially Completed: 3 (anti-scraping, persistent caching, macro analyst data)*
 *From TradingAgents-CN: 11*
 *Estimated Total Effort: 150-200 hours*

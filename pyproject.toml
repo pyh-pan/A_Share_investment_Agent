@@ -30,6 +30,10 @@ google-genai = "^0.6.0"
 uvicorn = "^0.34.0"
 fastapi = "^0.115.12"
 playwright = "^1.52.0"
+chromadb = {version = "^0.5.0", optional = true}
+
+[tool.poetry.extras]
+memory = ["chromadb"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"
