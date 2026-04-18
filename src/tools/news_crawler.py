@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 import pandas as pd
 from urllib.parse import urlparse
 from src.tools.openrouter_config import get_chat_completion, logger as api_logger
+from src.tools.http_client import smart_get
 
 # 导入新的搜索模块
 try:
@@ -152,7 +153,6 @@ def convert_search_results_to_news_format(search_results, symbol: str) -> list:
 
 def _fetch_news_from_eastmoney(symbol: str, max_news: int = 100) -> list:
     """直接从东方财富搜索API获取新闻（修复akshare的HTTP/HTTPS问题）"""
-    import requests as req
     import json as js
     import re
 
@@ -184,7 +184,7 @@ def _fetch_news_from_eastmoney(symbol: str, max_news: int = 100) -> list:
         }, ensure_ascii=False),
     }
     try:
-        r = req.get(url, params=params, headers=headers, timeout=15)
+        r = smart_get(url, params=params, headers=headers, timeout=15)
         r.raise_for_status()
         text = r.text.strip()
         if not text:
@@ -678,6 +678,108 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
     return final_news_list
 
 
+def get_news_sentiment_details(news_list: list, num_of_news: int = 5) -> dict:
+    """Analyze sentiment with structured output and prompt-version cache key."""
+    if not news_list:
+        return {
+            "overall_score": 0.0,
+            "news_scores": [],
+            "summary": "无可用新闻",
+        }
+
+    prompt_version = "sentiment_v2_structured"
+    cache_file = "src/data/sentiment_cache.json"
+    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+
+    news_key = "|".join(
+        [
+            f"{prompt_version}|{news.get('title', '')}|{news.get('content', '')[:100]}|{news.get('publish_time', '')}"
+            for news in news_list[:num_of_news]
+        ]
+    )
+
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+            if news_key in cache and isinstance(cache[news_key], dict):
+                return cache[news_key]
+        except Exception:
+            cache = {}
+    else:
+        cache = {}
+
+    news_content = "\n\n".join([
+        f"[{idx + 1}] 标题：{news.get('title', '')}\n"
+        f"来源：{news.get('source', '未知来源')}\n"
+        f"时间：{news.get('publish_time', '未知时间')}\n"
+        f"内容：{(news.get('content', '') or '')[:500]}"
+        for idx, news in enumerate(news_list[:num_of_news])
+    ])
+
+    system_message = {
+        "role": "system",
+        "content": (
+            "你是A股情绪分析师。请对每条新闻输出 sentiment_score(-1到1)、importance(1到3)、"
+            "impact_scope(company/industry/market)，并给出 overall_score(-1到1)。"
+            "仅输出JSON，格式："
+            "{\"overall_score\": float, \"news_scores\": [{\"idx\": int, \"sentiment_score\": float, \"importance\": int, \"impact_scope\": str, \"reason\": str}], \"summary\": str}"
+        )
+    }
+    user_message = {
+        "role": "user",
+        "content": f"请分析如下新闻：\n\n{news_content}",
+    }
+
+    try:
+        result = get_chat_completion([system_message, user_message])
+        if result is None:
+            return {"overall_score": 0.0, "news_scores": [], "summary": "LLM返回空"}
+        parsed = None
+        try:
+            parsed = json.loads(result.strip())
+        except Exception:
+            import re
+
+            match = re.search(r"```json\s*(.*?)\s*```", result, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group(1))
+        if not isinstance(parsed, dict):
+            return {"overall_score": 0.0, "news_scores": [], "summary": "解析失败"}
+
+        parsed["overall_score"] = float(max(-1.0, min(1.0, float(parsed.get("overall_score", 0.0)))))
+        if not isinstance(parsed.get("news_scores"), list):
+            parsed["news_scores"] = []
+
+        cache[news_key] = parsed
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        return parsed
+    except Exception:
+        return {"overall_score": 0.0, "news_scores": [], "summary": "分析失败"}
+
+
+def get_forum_sentiment(symbol: str) -> dict:
+    """Best-effort forum sentiment from Eastmoney guba pages with fallback."""
+    url = f"https://guba.eastmoney.com/list,{symbol}.html"
+    try:
+        resp = smart_get(url, timeout=8)
+        text = resp.text if hasattr(resp, "text") else ""
+        if not text:
+            return {"score": 0.0, "data_available": False, "source": "guba"}
+        positive_words = ["利好", "上涨", "增持", "买入", "反弹"]
+        negative_words = ["利空", "下跌", "减持", "卖出", "暴雷"]
+        pos = sum(text.count(x) for x in positive_words)
+        neg = sum(text.count(x) for x in negative_words)
+        total = pos + neg
+        if total == 0:
+            return {"score": 0.0, "data_available": False, "source": "guba"}
+        score = (pos - neg) / total
+        return {"score": max(-1.0, min(1.0, score)), "data_available": True, "source": "guba"}
+    except Exception:
+        return {"score": 0.0, "data_available": False, "source": "guba"}
+
+
 def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
     """分析新闻情感得分
 
@@ -691,108 +793,8 @@ def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
     if not news_list:
         return 0.0
 
-    # # 获取项目根目录
-    # project_root = os.path.dirname(os.path.dirname(
-    #     os.path.dirname(os.path.abspath(__file__))))
-
-    # 检查是否有缓存的情感分析结果
-    # 检查是否有缓存的情感分析结果
-    cache_file = "src/data/sentiment_cache.json"
-    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-
-    # 生成新闻内容的唯一标识
-    news_key = "|".join([
-        f"{news.get('title', '')}|{news.get('content', '')[:100]}|{news.get('publish_time', '')}"
-        for news in news_list[:num_of_news]
-    ])
-
-    # 检查缓存
-    if os.path.exists(cache_file):
-        print("发现情感分析缓存文件")
-        try:
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                cache = json.load(f)
-                if news_key in cache:
-                    print("使用缓存的情感分析结果")
-                    return cache[news_key]
-                print("未找到匹配的情感分析缓存")
-        except Exception as e:
-            print(f"读取情感分析缓存出错: {e}")
-            cache = {}
-    else:
-        print("未找到情感分析缓存文件，将创建新文件")
-        cache = {}
-
-    # 准备系统消息
-    system_message = {
-        "role": "system",
-        "content": """你是一个专业的A股市场分析师，擅长解读新闻对股票走势的影响。你需要分析一组新闻的情感倾向，并给出一个介于-1到1之间的分数：
-        - 1表示极其积极（例如：重大利好消息、超预期业绩、行业政策支持）
-        - 0.5到0.9表示积极（例如：业绩增长、新项目落地、获得订单）
-        - 0.1到0.4表示轻微积极（例如：小额合同签订、日常经营正常）
-        - 0表示中性（例如：日常公告、人事变动、无重大影响的新闻）
-        - -0.1到-0.4表示轻微消极（例如：小额诉讼、非核心业务亏损）
-        - -0.5到-0.9表示消极（例如：业绩下滑、重要客户流失、行业政策收紧）
-        - -1表示极其消极（例如：重大违规、核心业务严重亏损、被监管处罚）
-
-        分析时重点关注：
-        1. 业绩相关：财报、业绩预告、营收利润等
-        2. 政策影响：行业政策、监管政策、地方政策等
-        3. 市场表现：市场份额、竞争态势、商业模式等
-        4. 资本运作：并购重组、股权激励、定增配股等
-        5. 风险事件：诉讼仲裁、处罚、债务等
-        6. 行业地位：技术创新、专利、市占率等
-        7. 舆论环境：媒体评价、社会影响等
-
-        请确保分析：
-        1. 新闻的真实性和可靠性
-        2. 新闻的时效性和影响范围
-        3. 对公司基本面的实际影响
-        4. A股市场的特殊反应规律"""
-    }
-
-    # 准备新闻内容
-    news_content = "\n\n".join([
-        f"标题：{news.get('title', '')}\n"
-        f"来源：{news.get('source', '未知来源')}\n"
-        f"时间：{news.get('publish_time', '未知时间')}\n"
-        f"内容：{news.get('content', '')}"
-        for news in news_list[:num_of_news]  # 使用指定数量的新闻
-    ])
-
-    user_message = {
-        "role": "user",
-        "content": f"请分析以下A股上市公司相关新闻的情感倾向：\n\n{news_content}\n\n请直接返回一个数字，范围是-1到1，无需解释。"
-    }
-
+    details = get_news_sentiment_details(news_list, num_of_news=num_of_news)
     try:
-        # 获取LLM分析结果
-        result = get_chat_completion([system_message, user_message])
-        if result is None:
-            print("错误: LLM 返回 None")
-            return 0.0
-
-        # 提取数字结果
-        try:
-            sentiment_score = float(result.strip())
-        except ValueError as e:
-            print(f"情绪评分解析错误: {e}")
-            print(f"原始结果: {result}")
-            return 0.0
-
-        # 确保分数在-1到1之间
-        sentiment_score = max(-1.0, min(1.0, sentiment_score))
-
-        # 缓存结果
-        cache[news_key] = sentiment_score
-        try:
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"写入缓存错误: {e}")
-
-        return sentiment_score
-
-    except Exception as e:
-        print(f"新闻情绪分析错误: {e}")
-        return 0.0  # 出错时返回中性分数
+        return float(details.get("overall_score", 0.0))
+    except Exception:
+        return 0.0

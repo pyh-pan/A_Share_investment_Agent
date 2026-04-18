@@ -65,6 +65,7 @@ def technical_analyst_agent(state: AgentState):
     # Calculate indicators
     # 1. MACD (Moving Average Convergence Divergence)
     macd_line, signal_line = calculate_macd(prices_df)
+    macd_divergence = detect_macd_divergence(prices_df, macd_line=macd_line)
 
     # 2. RSI (Relative Strength Index)
     rsi = calculate_rsi(prices_df)
@@ -74,6 +75,9 @@ def technical_analyst_agent(state: AgentState):
 
     # 4. OBV (On-Balance Volume)
     obv = calculate_obv(prices_df)
+
+    # 5. KDJ
+    kdj = calculate_kdj(prices_df)
 
     # Generate individual signals
     signals = []
@@ -112,6 +116,12 @@ def technical_analyst_agent(state: AgentState):
     else:
         signals.append('neutral')
 
+    # KDJ signal
+    signals.append(kdj['signal'])
+
+    # MACD divergence signal
+    signals.append(macd_divergence['signal'])
+
     # Calculate price drop
     price_drop = (prices_df['close'].iloc[-1] -
                   prices_df['close'].iloc[-5]) / prices_df['close'].iloc[-5]
@@ -141,6 +151,14 @@ def technical_analyst_agent(state: AgentState):
         "OBV": {
             "signal": signals[3],
             "details": f"OBV 斜率为 {obv_slope:.2f} ({'正向' if signals[3] == 'bullish' else '负向' if signals[3] == 'bearish' else '持平'})"
+        },
+        "KDJ": {
+            "signal": signals[4],
+            "details": f"K={kdj['k']:.2f}, D={kdj['d']:.2f}, J={kdj['j']:.2f}"
+        },
+        "MACD_divergence": {
+            "signal": signals[5],
+            "details": macd_divergence.get('reason', '未检测到背离')
         }
     }
 
@@ -167,7 +185,9 @@ def technical_analyst_agent(state: AgentState):
             "MACD": reasoning["MACD"],
             "RSI": reasoning["RSI"],
             "Bollinger": reasoning["Bollinger"],
-            "OBV": reasoning["OBV"]
+            "OBV": reasoning["OBV"],
+            "KDJ": reasoning["KDJ"],
+            "MACD_divergence": reasoning["MACD_divergence"],
         }
     }
 
@@ -179,6 +199,17 @@ def technical_analyst_agent(state: AgentState):
 
     # 3. Momentum Strategy
     momentum_signals = calculate_momentum_signals(prices_df)
+    if kdj["signal"] != "neutral":
+        momentum_signals["signal"] = kdj["signal"]
+        momentum_signals["confidence"] = max(momentum_signals["confidence"], 0.65)
+    momentum_signals.setdefault("metrics", {})["kdj_k"] = float(kdj["k"])
+    momentum_signals.setdefault("metrics", {})["kdj_d"] = float(kdj["d"])
+    momentum_signals.setdefault("metrics", {})["kdj_j"] = float(kdj["j"])
+
+    if macd_divergence["signal"] != "neutral":
+        trend_signals["signal"] = macd_divergence["signal"]
+        trend_signals["confidence"] = max(trend_signals["confidence"], 0.7)
+    trend_signals.setdefault("metrics", {})["macd_divergence"] = macd_divergence.get("divergence")
 
     # 4. Volatility Strategy
     volatility_signals = calculate_volatility_signals(prices_df)
@@ -554,6 +585,70 @@ def calculate_macd(prices_df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     macd_line = ema_12 - ema_26
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
     return macd_line, signal_line
+
+
+def calculate_kdj(prices_df: pd.DataFrame, n: int = 9, m1: int = 3, m2: int = 3) -> Dict[str, float]:
+    low_list = prices_df['low'].rolling(window=n, min_periods=n).min()
+    high_list = prices_df['high'].rolling(window=n, min_periods=n).max()
+    denominator = (high_list - low_list).replace(0, np.nan)
+    rsv = ((prices_df['close'] - low_list) / denominator * 100).fillna(50)
+
+    k = rsv.ewm(alpha=1 / m1, adjust=False).mean()
+    d = k.ewm(alpha=1 / m2, adjust=False).mean()
+    j = 3 * k - 2 * d
+
+    current_k = float(k.iloc[-1])
+    current_d = float(d.iloc[-1])
+    current_j = float(j.iloc[-1])
+    if current_j < 0 and current_k < 20:
+        signal = "bullish"
+    elif current_j > 100 and current_k > 80:
+        signal = "bearish"
+    else:
+        signal = "neutral"
+
+    return {
+        "k": current_k,
+        "d": current_d,
+        "j": current_j,
+        "signal": signal,
+    }
+
+
+def detect_macd_divergence(
+    prices_df: pd.DataFrame,
+    macd_line: pd.Series,
+    lookback: int = 60,
+) -> Dict[str, str]:
+    if len(prices_df) < lookback or macd_line is None or macd_line.empty:
+        return {"divergence": None, "signal": "neutral", "reason": "数据不足"}
+
+    recent_prices = prices_df['close'].tail(lookback)
+    recent_macd = macd_line.tail(lookback)
+    window = 5
+
+    price_high_points = recent_prices[recent_prices == recent_prices.rolling(window, center=True).max()].dropna()
+    macd_high_points = recent_macd.reindex(price_high_points.index).dropna()
+
+    if len(price_high_points) >= 2 and len(macd_high_points) >= 2:
+        if price_high_points.iloc[-1] > price_high_points.iloc[-2] and macd_high_points.iloc[-1] < macd_high_points.iloc[-2]:
+            return {
+                "divergence": "top",
+                "signal": "bearish",
+                "reason": "顶背离：价格创新高而MACD未创新高",
+            }
+
+    price_low_points = recent_prices[recent_prices == recent_prices.rolling(window, center=True).min()].dropna()
+    macd_low_points = recent_macd.reindex(price_low_points.index).dropna()
+    if len(price_low_points) >= 2 and len(macd_low_points) >= 2:
+        if price_low_points.iloc[-1] < price_low_points.iloc[-2] and macd_low_points.iloc[-1] > macd_low_points.iloc[-2]:
+            return {
+                "divergence": "bottom",
+                "signal": "bullish",
+                "reason": "底背离：价格创新低而MACD未创新低",
+            }
+
+    return {"divergence": None, "signal": "neutral", "reason": "未检测到背离"}
 
 
 def calculate_rsi(prices_df: pd.DataFrame, period: int = 14) -> pd.Series:

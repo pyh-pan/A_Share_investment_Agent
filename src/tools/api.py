@@ -127,6 +127,185 @@ def _fetch_with_fallback(
     return None, "unavailable", last_error
 
 
+def _extract_latest_numeric(df: pd.DataFrame, candidates: List[str]) -> Optional[float]:
+    if df is None or df.empty:
+        return None
+    for col in df.columns:
+        for candidate in candidates:
+            if candidate in str(col):
+                value = pd.to_numeric(df[col], errors="coerce").dropna()
+                if not value.empty:
+                    return float(value.iloc[0])
+    for col in df.columns:
+        series = pd.to_numeric(df[col], errors="coerce").dropna()
+        if not series.empty:
+            return float(series.iloc[0])
+    return None
+
+
+def get_northbound_flow(days: int = 5) -> Dict[str, Any]:
+    """Get northbound capital flow signal from AKShare."""
+    neutral = {
+        "net_inflow_billion": 0.0,
+        "trend": "neutral",
+        "signal": "neutral",
+        "data_available": False,
+    }
+    try:
+        fetch_fn = getattr(ak, "stock_hsgt_north_net_flow_in_em", None)
+        if fetch_fn is not None:
+            df = fetch_fn(symbol="北上")
+        else:
+            hist_fn = getattr(ak, "stock_hsgt_hist_em", None)
+            if hist_fn is None:
+                return neutral
+            df = hist_fn(symbol="北向资金")
+        if df is None or df.empty:
+            return neutral
+        flow_cols = [c for c in df.columns if ("净流入" in str(c) or "净买额" in str(c))]
+        if not flow_cols:
+            return neutral
+        col = flow_cols[0]
+        recent = pd.to_numeric(df[col], errors="coerce").dropna().tail(days)
+        if recent.empty:
+            return neutral
+        total_inflow_billion = float(recent.sum())
+        if total_inflow_billion > 50:
+            trend, signal = "strong_inflow", "bullish"
+        elif total_inflow_billion > 10:
+            trend, signal = "moderate_inflow", "bullish"
+        elif total_inflow_billion > -10:
+            trend, signal = "neutral", "neutral"
+        elif total_inflow_billion > -50:
+            trend, signal = "moderate_outflow", "bearish"
+        else:
+            trend, signal = "strong_outflow", "bearish"
+        return {
+            "net_inflow_billion": round(total_inflow_billion, 2),
+            "trend": trend,
+            "signal": signal,
+            "data_available": True,
+        }
+    except Exception as e:
+        logger.warning(f"获取北向资金失败: {e}")
+        return neutral
+
+
+def get_macro_indicators() -> Dict[str, Dict[str, Any]]:
+    """Get core China macro indicators with graceful degradation."""
+    indicators: Dict[str, Dict[str, Any]] = {}
+
+    # Use lambdas so AttributeError is raised inside the try/except loop,
+    # not at dict construction time (some akshare functions may not exist)
+    fetch_map: Dict[str, Callable[[], pd.DataFrame]] = {
+        "gdp_growth": lambda: ak.macro_china_gdp(),
+        "cpi": lambda: ak.macro_china_cpi(),
+        "pmi": lambda: ak.macro_china_pmi(),
+        "lpr": lambda: ak.macro_china_lpr(),
+        "m2_growth": lambda: ak.macro_china_m2_yearly(),
+    }
+    key_words = {
+        "gdp_growth": ["同比增长", "增长", "GDP"],
+        "cpi": ["同比增长", "CPI"],
+        "pmi": ["PMI", "指数"],
+        "lpr": ["1Y", "5Y", "LPR", "报价"],
+        "m2_growth": ["同比增长", "M2", "增长"],
+    }
+
+    for metric, fetcher in fetch_map.items():
+        try:
+            df = fetcher()
+            value = _extract_latest_numeric(df, key_words[metric])
+            indicators[metric] = {
+                "value": value,
+                "data_available": value is not None,
+                "source": "akshare",
+            }
+        except Exception as e:
+            logger.warning(f"获取宏观指标 {metric} 失败: {e}")
+            indicators[metric] = {
+                "value": None,
+                "data_available": False,
+                "source": "akshare",
+            }
+    return indicators
+
+
+def get_industry_news(industry: str, max_news: int = 20) -> List[Dict[str, Any]]:
+    """Fetch industry-level news by keyword using the existing news_crawler."""
+    if not industry:
+        return []
+    try:
+        from src.tools.news_crawler import get_stock_news
+        raw_news = get_stock_news(industry, max_news=max_news)
+        if not raw_news:
+            return []
+        items: List[Dict[str, Any]] = []
+        for n in raw_news[:max_news]:
+            items.append(
+                {
+                    "title": str(n.get("title", "") or "").strip(),
+                    "content": str(n.get("content", "") or "")[:400].strip(),
+                    "publish_time": str(n.get("publish_time", "") or n.get("date", "") or ""),
+                    "source": str(n.get("source", "") or "").strip(),
+                    "url": str(n.get("url", "") or "").strip(),
+                    "keyword": industry,
+                }
+            )
+        return [x for x in items if x.get("title")]
+    except Exception as e:
+        logger.warning(f"获取行业新闻失败({industry}): {e}")
+        return []
+
+
+def calculate_beta(symbol: str, benchmark: str = "000300", period: int = 252) -> float:
+    """Compute stock beta versus benchmark index returns."""
+    try:
+        stock_df = get_price_history(symbol)
+        bench_df = get_price_history(benchmark)
+        if stock_df is None or stock_df.empty or bench_df is None or bench_df.empty:
+            return 1.0
+        stock_returns = stock_df[["date", "close"]].copy()
+        bench_returns = bench_df[["date", "close"]].copy()
+        stock_returns["stock"] = stock_returns["close"].pct_change()
+        bench_returns["bench"] = bench_returns["close"].pct_change()
+        merged = stock_returns[["date", "stock"]].merge(
+            bench_returns[["date", "bench"]], on="date", how="inner"
+        ).dropna()
+        merged = merged.tail(period)
+        if len(merged) < 30:
+            return 1.0
+        variance = float(np.var(merged["bench"]))
+        if variance <= 0:
+            return 1.0
+        covariance = float(np.cov(merged["stock"], merged["bench"])[0][1])
+        beta = covariance / variance
+        return float(max(0.3, min(beta, 2.5)))
+    except Exception as e:
+        logger.warning(f"计算 Beta 失败: {e}")
+        return 1.0
+
+
+def calculate_wacc(symbol: str, financial_metrics: Dict[str, Any], risk_free_rate: float = 0.03) -> float:
+    """Compute dynamic WACC with conservative fallback."""
+    try:
+        beta = calculate_beta(symbol=symbol)
+        market_premium = 0.06
+        cost_of_equity = risk_free_rate + beta * market_premium
+
+        debt_ratio = financial_metrics.get("debt_to_equity")
+        debt_ratio = float(debt_ratio) if debt_ratio is not None else 0.4
+        debt_ratio = max(0.0, min(debt_ratio, 1.0))
+
+        cost_of_debt = risk_free_rate + 0.02
+        tax_rate = 0.25
+        wacc = cost_of_equity * (1 - debt_ratio) + cost_of_debt * debt_ratio * (1 - tax_rate)
+        return float(max(0.08, min(wacc, 0.20)))
+    except Exception as e:
+        logger.warning(f"计算 WACC 失败: {e}")
+        return 0.10
+
+
 def _fetch_market_snapshot(symbol: str) -> Dict[str, Any]:
     normalized_symbol = _normalize_ak_symbol(symbol)
     snapshot: Dict[str, Any] = {
@@ -270,7 +449,7 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
         logger.info("正在获取利润表...")
         try:
             income_statement = ak.stock_financial_report_sina(
-                stock=f"sh{symbol}", symbol="利润表")
+                stock=_normalize_ak_symbol(symbol), symbol="利润表")
             if not income_statement.empty:
                 latest_income = income_statement.iloc[0]
                 logger.info("✓ 利润表获取完成")
@@ -424,7 +603,7 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         logger.info("正在获取资产负债表...")
         try:
             balance_sheet = ak.stock_financial_report_sina(
-                stock=f"sh{symbol}", symbol="资产负债表")
+                stock=_normalize_ak_symbol(symbol), symbol="资产负债表")
             if not balance_sheet.empty:
                 latest_balance = balance_sheet.iloc[0]
                 previous_balance = balance_sheet.iloc[1] if len(
@@ -445,7 +624,7 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         logger.info("正在获取利润表...")
         try:
             income_statement = ak.stock_financial_report_sina(
-                stock=f"sh{symbol}", symbol="利润表")
+                stock=_normalize_ak_symbol(symbol), symbol="利润表")
             if not income_statement.empty:
                 latest_income = income_statement.iloc[0]
                 previous_income = income_statement.iloc[1] if len(
@@ -466,7 +645,7 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         logger.info("正在获取现金流量表...")
         try:
             cash_flow = ak.stock_financial_report_sina(
-                stock=f"sh{symbol}", symbol="现金流量表")
+                stock=_normalize_ak_symbol(symbol), symbol="现金流量表")
             if not cash_flow.empty:
                 latest_cash_flow = cash_flow.iloc[0]
                 previous_cash_flow = cash_flow.iloc[1] if len(

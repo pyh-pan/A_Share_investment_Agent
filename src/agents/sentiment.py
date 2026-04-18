@@ -1,13 +1,39 @@
 from langchain_core.messages import HumanMessage
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
-from src.tools.news_crawler import get_stock_news, get_news_sentiment
+from src.tools.news_crawler import (
+    get_stock_news,
+    get_news_sentiment,
+    get_news_sentiment_details,
+    get_forum_sentiment,
+)
 from src.utils.logging_config import setup_logger
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
 import json
 from datetime import datetime, timedelta
+import math
 
 # 设置日志记录
 logger = setup_logger('sentiment_agent')
+
+
+def _temporal_decay_weights(news_list: list, half_life_days: float = 3.0) -> list:
+    now = datetime.now()
+    weights = []
+    for news in news_list:
+        publish_time = news.get("publish_time")
+        if not publish_time:
+            weights.append(0.5)
+            continue
+        try:
+            dt = datetime.strptime(publish_time, "%Y-%m-%d %H:%M:%S")
+            days_ago = max((now - dt).total_seconds() / 86400.0, 0.0)
+            weights.append(math.pow(0.5, days_ago / half_life_days))
+        except Exception:
+            weights.append(0.5)
+    total = sum(weights)
+    if total <= 0:
+        return [1.0 / len(news_list)] * len(news_list)
+    return [w / total for w in weights]
 
 
 @agent_endpoint("sentiment", "情感分析师，分析市场新闻和社交媒体情绪")
@@ -51,29 +77,64 @@ def sentiment_agent(state: AgentState):
         message_content = {
             "signal": signal,
             "confidence": confidence,
-            "reasoning": "没有可用的近期新闻用于情绪分析。",
+            "reasoning": {
+                "summary": "没有可用的近期新闻用于情绪分析。",
+                "overall_score": 0.0,
+                "decay_weighted_score": 0.0,
+            },
             "news_count": 0,
             "status": "unavailable",
         }
+        sentiment_payload = {"overall_score": 0.0, "news_scores": []}
     else:
         sentiment_score = get_news_sentiment(recent_news, num_of_news=num_of_news)
+        sentiment_payload = get_news_sentiment_details(recent_news, num_of_news=num_of_news)
+        forum_payload = get_forum_sentiment(symbol)
+
+        decay_weights = _temporal_decay_weights(recent_news)
+        score_map = {}
+        for item in sentiment_payload.get("news_scores", []):
+            idx = item.get("idx")
+            score = item.get("sentiment_score", 0.0)
+            if isinstance(idx, int):
+                score_map[idx - 1] = float(score)
+        weighted_score = 0.0
+        if decay_weights:
+            for i, weight in enumerate(decay_weights):
+                weighted_score += weight * score_map.get(i, sentiment_score)
+        weighted_score = max(-1.0, min(1.0, weighted_score))
+
+        # 融合论坛情绪（仅在可用时占20%）
+        if forum_payload.get("data_available"):
+            weighted_score = weighted_score * 0.8 + float(forum_payload.get("score", 0.0)) * 0.2
+            weighted_score = max(-1.0, min(1.0, weighted_score))
 
         # 根据情感分数生成交易信号和置信度
-        if sentiment_score >= 0.5:
+        if weighted_score >= 0.5:
             signal = "bullish"
-            confidence = str(round(abs(sentiment_score) * 100)) + "%"
-        elif sentiment_score <= -0.5:
+            confidence = str(round(abs(weighted_score) * 100)) + "%"
+        elif weighted_score <= -0.5:
             signal = "bearish"
-            confidence = str(round(abs(sentiment_score) * 100)) + "%"
+            confidence = str(round(abs(weighted_score) * 100)) + "%"
         else:
             signal = "neutral"
-            confidence = str(round((1 - abs(sentiment_score)) * 100)) + "%"
+            confidence = str(round((1 - abs(weighted_score)) * 100)) + "%"
 
         # 生成分析结果
         message_content = {
             "signal": signal,
             "confidence": confidence,
-            "reasoning": f"基于 {len(recent_news)} 篇近期新闻，情绪评分: {sentiment_score:.2f}",
+            "reasoning": {
+                "summary": sentiment_payload.get("summary", ""),
+                "overall_score": sentiment_score,
+                "decay_weighted_score": weighted_score,
+                "score_distribution": {
+                    "positive": sum(1 for s in sentiment_payload.get("news_scores", []) if float(s.get("sentiment_score", 0)) > 0.2),
+                    "neutral": sum(1 for s in sentiment_payload.get("news_scores", []) if -0.2 <= float(s.get("sentiment_score", 0)) <= 0.2),
+                    "negative": sum(1 for s in sentiment_payload.get("news_scores", []) if float(s.get("sentiment_score", 0)) < -0.2),
+                },
+                "forum_sentiment": forum_payload,
+            },
             "news_count": len(recent_news),
             "status": "ok",
         }
@@ -97,7 +158,12 @@ def sentiment_agent(state: AgentState):
         "messages": [message],
         "data": {
             **data,
-            "sentiment_analysis": sentiment_score
+            "sentiment_analysis": {
+                "overall_score": sentiment_score,
+                "structured": sentiment_payload,
+                "signal": message_content["signal"],
+                "confidence": message_content["confidence"],
+            },
         },
         "metadata": state["metadata"],
     }

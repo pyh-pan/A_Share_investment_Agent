@@ -9,6 +9,72 @@ import json
 # 初始化 logger
 logger = setup_logger('fundamentals_agent')
 
+INDUSTRY_THRESHOLDS = {
+    "银行": {
+        "return_on_equity": (0.10, 0.13),
+        "net_margin": (0.20, 0.30),
+        "operating_margin": (0.20, 0.30),
+        "debt_ratio_max": 0.95,
+        "pe_ratio": 10,
+        "price_to_book": 1.5,
+        "price_to_sales": 8,
+    },
+    "非银金融": {
+        "return_on_equity": (0.08, 0.12),
+        "net_margin": (0.10, 0.20),
+        "operating_margin": (0.10, 0.20),
+        "debt_ratio_max": 0.85,
+        "pe_ratio": 20,
+        "price_to_book": 2.0,
+        "price_to_sales": 8,
+    },
+    "房地产": {
+        "return_on_equity": (0.08, 0.12),
+        "net_margin": (0.08, 0.15),
+        "operating_margin": (0.08, 0.15),
+        "debt_ratio_max": 0.80,
+        "pe_ratio": 18,
+        "price_to_book": 2.0,
+        "price_to_sales": 4,
+    },
+    "计算机": {
+        "return_on_equity": (0.10, 0.15),
+        "net_margin": (0.10, 0.20),
+        "operating_margin": (0.10, 0.20),
+        "debt_ratio_max": 0.55,
+        "pe_ratio": 45,
+        "price_to_book": 6,
+        "price_to_sales": 12,
+    },
+    "电子": {
+        "return_on_equity": (0.10, 0.15),
+        "net_margin": (0.08, 0.15),
+        "operating_margin": (0.08, 0.15),
+        "debt_ratio_max": 0.55,
+        "pe_ratio": 40,
+        "price_to_book": 5,
+        "price_to_sales": 10,
+    },
+    "医药生物": {
+        "return_on_equity": (0.12, 0.18),
+        "net_margin": (0.12, 0.25),
+        "operating_margin": (0.12, 0.25),
+        "debt_ratio_max": 0.50,
+        "pe_ratio": 45,
+        "price_to_book": 6,
+        "price_to_sales": 10,
+    },
+    "default": {
+        "return_on_equity": (0.15, 0.20),
+        "net_margin": (0.20, 0.30),
+        "operating_margin": (0.15, 0.25),
+        "debt_ratio_max": 0.50,
+        "pe_ratio": 25,
+        "price_to_book": 3,
+        "price_to_sales": 5,
+    },
+}
+
 ##### Fundamental Agent #####
 
 
@@ -19,6 +85,8 @@ def fundamentals_agent(state: AgentState):
     show_reasoning = state["metadata"]["show_reasoning"]
     data = state["data"]
     metrics = data["financial_metrics"][0]
+    industry = data.get("industry_classification", "default")
+    thresholds_by_industry = INDUSTRY_THRESHOLDS.get(industry, INDUSTRY_THRESHOLDS["default"])
 
     # Initialize signals list for different fundamental aspects
     signals = []
@@ -29,10 +97,14 @@ def fundamentals_agent(state: AgentState):
     net_margin = metrics.get("net_margin", 0)
     operating_margin = metrics.get("operating_margin", 0)
 
+    roe_threshold = thresholds_by_industry["return_on_equity"][0]
+    net_margin_threshold = thresholds_by_industry["net_margin"][0]
+    operating_margin_threshold = thresholds_by_industry["operating_margin"][0]
+
     thresholds = [
-        (return_on_equity, 0.15),  # Strong ROE above 15%
-        (net_margin, 0.20),  # Healthy profit margins
-        (operating_margin, 0.15)  # Strong operating efficiency
+        (return_on_equity, roe_threshold),
+        (net_margin, net_margin_threshold),
+        (operating_margin, operating_margin_threshold),
     ]
     profitability_score = sum(
         metric is not None and metric > threshold
@@ -60,10 +132,11 @@ def fundamentals_agent(state: AgentState):
     earnings_growth = metrics.get("earnings_growth", 0)
     book_value_growth = metrics.get("book_value_growth", 0)
 
+    growth_floor = 0.08 if industry in {"银行", "非银金融", "房地产"} else 0.10
     thresholds = [
-        (revenue_growth, 0.10),  # 10% revenue growth
-        (earnings_growth, 0.10),  # 10% earnings growth
-        (book_value_growth, 0.10)  # 10% book value growth
+        (revenue_growth, growth_floor),
+        (earnings_growth, growth_floor),
+        (book_value_growth, growth_floor),
     ]
     growth_score = sum(
         metric is not None and metric > threshold
@@ -92,7 +165,8 @@ def fundamentals_agent(state: AgentState):
     health_score = 0
     if current_ratio and current_ratio > 1.5:  # Strong liquidity
         health_score += 1
-    if debt_to_equity and debt_to_equity < 0.5:  # Conservative debt levels
+    debt_to_equity_max = thresholds_by_industry["debt_ratio_max"]
+    if debt_to_equity and debt_to_equity < debt_to_equity_max:
         health_score += 1
     if (free_cash_flow_per_share and earnings_per_share and
             free_cash_flow_per_share > earnings_per_share * 0.8):  # Strong FCF conversion
@@ -117,9 +191,9 @@ def fundamentals_agent(state: AgentState):
     price_to_sales = metrics.get("price_to_sales", 0)
 
     thresholds = [
-        (pe_ratio, 25),  # Reasonable P/E ratio
-        (price_to_book, 3),  # Reasonable P/B ratio
-        (price_to_sales, 5)  # Reasonable P/S ratio
+        (pe_ratio, thresholds_by_industry["pe_ratio"]),
+        (price_to_book, thresholds_by_industry["price_to_book"]),
+        (price_to_sales, thresholds_by_industry["price_to_sales"]),
     ]
     price_ratio_score = sum(
         metric is not None and metric < threshold
@@ -136,7 +210,7 @@ def fundamentals_agent(state: AgentState):
             f"市净率: {price_to_book:.2f}" if price_to_book else "市净率: N/A"
         ) + ", " + (
             f"市销率: {price_to_sales:.2f}" if price_to_sales else "市销率: N/A"
-        )
+        ) + f"，行业: {industry}"
     }
 
     # Determine overall signal
@@ -157,7 +231,13 @@ def fundamentals_agent(state: AgentState):
     message_content = {
         "signal": overall_signal,
         "confidence": f"{round(confidence * 100)}%",
-        "reasoning": reasoning
+        "reasoning": {
+            **reasoning,
+            "industry_context": {
+                "industry": industry,
+                "threshold_profile": thresholds_by_industry,
+            },
+        },
     }
 
     # Create the fundamental analysis message

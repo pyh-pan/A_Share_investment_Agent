@@ -78,7 +78,5 @@ temp/
 # macro analysis
 src/data/macro_analysis_cache.json
 
-test/
-test*
 src/crawler/*.ts
 *.json

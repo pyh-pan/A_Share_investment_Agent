@@ -131,6 +131,70 @@ def get_chat_completion(messages, model=None, max_retries=3, initial_retry_delay
         return None
 
 
+def _extract_numeric_tokens(text: str) -> set[str]:
+    import re
+
+    if not text:
+        return set()
+    return set(re.findall(r"\d+\.?\d*", text))
+
+
+def _detect_hallucinated_numbers(response_text: str, data_context: dict | None) -> bool:
+    if not response_text or not data_context:
+        return False
+    response_numbers = _extract_numeric_tokens(response_text)
+    context_numbers = _extract_numeric_tokens(
+        json.dumps(data_context, ensure_ascii=False, sort_keys=True)
+    )
+
+    suspicious = set()
+    for number in response_numbers - context_numbers:
+        try:
+            value = float(number)
+            if value > 10 and not number.startswith(("19", "20")):
+                suspicious.add(number)
+        except Exception:
+            continue
+    return len(suspicious) >= 3
+
+
+def get_chat_completion_with_validation(
+    messages,
+    data_context: dict | None = None,
+    validation_mode: str = "warn",  # off | warn | force
+    **kwargs,
+):
+    """Optional anti-hallucination wrapper.
+
+    Keeps existing default flow untouched. Agents opt-in when needed.
+    """
+    result = get_chat_completion(messages, **kwargs)
+    if result is None or validation_mode == "off" or not data_context:
+        return result
+
+    hallucinated = _detect_hallucinated_numbers(result, data_context)
+    if not hallucinated:
+        return result
+
+    if validation_mode == "warn":
+        return f"{result}\n\n⚠️ 注意：检测到输出中可能存在未在输入数据中出现的数值，请谨慎解读。"
+
+    if validation_mode == "force":
+        forced_messages = list(messages) + [
+            {
+                "role": "user",
+                "content": (
+                    "你刚才可能使用了未提供的数据。"
+                    "请严格基于以下真实数据重新分析，并仅返回JSON：\n"
+                    f"{json.dumps(data_context, ensure_ascii=False)}"
+                ),
+            }
+        ]
+        return get_chat_completion(forced_messages, **kwargs)
+
+    return result
+
+
 # === LLM 调用缓存 ===
 _LLM_CACHE_FILE = os.path.join("src", "data", "llm_cache.json")
 

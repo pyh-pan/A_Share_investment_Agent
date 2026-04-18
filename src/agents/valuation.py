@@ -2,6 +2,7 @@ from langchain_core.messages import HumanMessage
 from src.utils.logging_config import setup_logger
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
+from src.tools.api import calculate_wacc
 import json
 
 # 初始化 logger
@@ -14,6 +15,7 @@ def valuation_agent(state: AgentState):
     show_workflow_status("估值分析师")
     show_reasoning = state["metadata"]["show_reasoning"]
     data = state["data"]
+    symbol = data["ticker"]
     metrics = data["financial_metrics"][0]
     current_financial_line_item = data["financial_line_items"][0]
     previous_financial_line_item = data["financial_line_items"][1]
@@ -52,6 +54,8 @@ def valuation_agent(state: AgentState):
     working_capital_change = (current_financial_line_item.get(
         'working_capital') or 0) - (previous_financial_line_item.get('working_capital') or 0)
 
+    dynamic_wacc = calculate_wacc(symbol=symbol, financial_metrics=metrics)
+
     # Owner Earnings Valuation (Buffett Method)
     owner_earnings_value = calculate_owner_earnings_value(
         net_income=current_financial_line_item.get('net_income'),
@@ -60,7 +64,7 @@ def valuation_agent(state: AgentState):
         capex=current_financial_line_item.get('capital_expenditure'),
         working_capital_change=working_capital_change,
         growth_rate=earnings_growth,
-        required_return=0.15,
+        required_return=min(dynamic_wacc + 0.05, 0.25),
         margin_of_safety=0.25
     )
 
@@ -68,7 +72,7 @@ def valuation_agent(state: AgentState):
     dcf_value = calculate_intrinsic_value(
         free_cash_flow=current_financial_line_item.get('free_cash_flow'),
         growth_rate=earnings_growth,
-        discount_rate=0.10,
+        discount_rate=dynamic_wacc,
         terminal_growth_rate=0.03,
         num_years=5,
     )
@@ -77,6 +81,12 @@ def valuation_agent(state: AgentState):
     dcf_gap = (dcf_value - market_cap) / market_cap
     owner_earnings_gap = (owner_earnings_value - market_cap) / market_cap
     valuation_gap = (dcf_gap + owner_earnings_gap) / 2
+
+    if (current_financial_line_item.get('free_cash_flow') or 0) <= 0:
+        reasoning["cash_flow_warning"] = {
+            "signal": "bearish",
+            "details": "自由现金流为负，DCF估值参考意义有限，已按保守方式处理。",
+        }
 
     if valuation_gap > 0.10:  # Changed from 0.15 to 0.10 (10% undervalued)
         signal = 'bullish'
@@ -87,7 +97,7 @@ def valuation_agent(state: AgentState):
 
     reasoning["dcf_analysis"] = {
         "signal": "bullish" if dcf_gap > 0.10 else "bearish" if dcf_gap < -0.20 else "neutral",
-        "details": f"内在价值: ¥{dcf_value:,.2f}, 市值: ¥{market_cap:,.2f}, 差距: {dcf_gap:.1%}"
+        "details": f"内在价值: ¥{dcf_value:,.2f}, 市值: ¥{market_cap:,.2f}, 差距: {dcf_gap:.1%}, WACC: {dynamic_wacc:.2%}"
     }
 
     reasoning["owner_earnings_analysis"] = {
@@ -98,7 +108,13 @@ def valuation_agent(state: AgentState):
     message_content = {
         "signal": signal,
         "confidence": f"{abs(valuation_gap):.0%}",
-        "reasoning": reasoning
+        "reasoning": {
+            **reasoning,
+            "valuation_assumptions": {
+                "wacc": dynamic_wacc,
+                "earnings_growth": earnings_growth,
+            },
+        },
     }
 
     message = HumanMessage(
@@ -168,20 +184,20 @@ def calculate_owner_earnings_value(
         if owner_earnings <= 0:
             return 0
 
-        # 调整增长率，确保合理性
-        growth_rate = min(max(growth_rate, 0), 0.25)  # 限制在0-25%之间
+        # 调整增长率，允许负增长但设置下限
+        growth_rate = min(max(growth_rate, -0.10), 0.25)
 
         # 计算预测期收益现值
         future_values = []
         for year in range(1, num_years + 1):
             # 使用递减增长率模型
-            year_growth = growth_rate * (1 - year / (2 * num_years))  # 增长率逐年递减
+            year_growth = growth_rate * (1 - year / (2 * num_years))
             future_value = owner_earnings * (1 + year_growth) ** year
             discounted_value = future_value / (1 + required_return) ** year
             future_values.append(discounted_value)
 
         # 计算永续价值
-        terminal_growth = min(growth_rate * 0.4, 0.03)  # 永续增长率取增长率的40%或3%的较小值
+        terminal_growth = min(max(growth_rate * 0.4, 0.0), 0.03)
         terminal_value = (
             future_values[-1] * (1 + terminal_growth)) / (required_return - terminal_growth)
         terminal_value_discounted = terminal_value / \
@@ -222,11 +238,11 @@ def calculate_intrinsic_value(
         if not isinstance(free_cash_flow, (int, float)) or free_cash_flow <= 0:
             return 0
 
-        # 调整增长率，确保合理性
-        growth_rate = min(max(growth_rate, 0), 0.25)  # 限制在0-25%之间
+        # 调整增长率，允许负增长但设置下限
+        growth_rate = min(max(growth_rate, -0.10), 0.25)
 
         # 调整永续增长率，不能超过经济平均增长
-        terminal_growth_rate = min(growth_rate * 0.4, 0.03)  # 取增长率的40%或3%的较小值
+        terminal_growth_rate = min(max(growth_rate * 0.4, 0.0), 0.03)
 
         # 计算预测期现金流现值
         present_values = []

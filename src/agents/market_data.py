@@ -1,7 +1,14 @@
 from langchain_core.messages import HumanMessage
 from src.tools.openrouter_config import get_chat_completion
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
-from src.tools.api import get_financial_metrics, get_financial_statements, get_market_data, get_price_history
+from src.tools.api import (
+    get_financial_metrics,
+    get_financial_statements,
+    get_market_data,
+    get_northbound_flow,
+    get_price_history,
+)
+from src.tools.industry_service import IndustryService
 from src.utils.logging_config import setup_logger
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
 
@@ -76,6 +83,13 @@ def market_data_agent(state: AgentState):
         logger.error(f"获取市场数据失败: {str(e)}")
         market_data = {"market_cap": 0, "_status": "unavailable", "_error": str(e)}
 
+    # 行业分类（用于基本面行业阈值）
+    industry_service = IndustryService()
+    industry_classification = industry_service.get_industry(ticker)
+
+    # 北向资金（A股特有“聪明钱”信号）
+    northbound_flow = get_northbound_flow(days=5)
+
     # 确保数据格式正确
     if not isinstance(prices_df, pd.DataFrame):
         prices_df = pd.DataFrame(
@@ -118,7 +132,9 @@ def market_data_agent(state: AgentState):
             f"为{ticker}收集了从{start_date}到{end_date}的市场数据。"
             f" 价格历史源: {price_data_source};"
             f" 财务指标可用: {financial_metrics_available};"
-            f" 市场数据可用: {market_data_available}."
+            f" 市场数据可用: {market_data_available};"
+            f" 行业分类: {industry_classification};"
+            f" 北向资金信号: {northbound_flow.get('signal', 'neutral')}."
         ),
     }
 
@@ -137,6 +153,8 @@ def market_data_agent(state: AgentState):
             "financial_line_items": financial_line_items,
             "market_cap": market_data.get("market_cap", 0),
             "market_data": market_data,
+            "industry_classification": industry_classification,
+            "northbound_flow": northbound_flow,
         },
         "metadata": state["metadata"],
     }
