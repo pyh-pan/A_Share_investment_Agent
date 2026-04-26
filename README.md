@@ -142,7 +142,7 @@ A_Share_investment_Agent/
 ├── tests/                # pytest 单元测试
 ├── .env.example          # 环境变量示例
 ├── CHANGELOG.md          # 变更日志
-├── CLAUDE.md             # 优化路线图
+├── AGENTS.md              # 优化路线图
 └── pyproject.toml        # Poetry 项目配置
 ```
 
