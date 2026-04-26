@@ -1,7 +1,28 @@
 import pandas as pd
 
+from src.tools.cache.db_cache import SimpleCache
 from src.tools.api import calculate_wacc, get_northbound_flow
 from src.tools.data_source_manager import DataSourceManager
+
+
+def test_data_source_manager_import_and_cache_roundtrip(tmp_path):
+    cache = SimpleCache(db_path=tmp_path / "cache.db")
+    cache.set("k", {"value": 1}, ttl_hours=1)
+
+    assert cache.get("k", max_age_hours=1) == {"value": 1}
+    assert DataSourceManager(cache=cache).fetch_with_fallback(
+        cache_key="k",
+        fetchers=[lambda: {"value": 2}],
+        source_names=["fallback"],
+        cache_ttl_hours=1,
+    ) == {"value": 1}
+
+
+def test_simple_cache_treats_zero_age_as_expired(tmp_path):
+    cache = SimpleCache(db_path=tmp_path / "cache.db")
+    cache.set("expired", {"value": 1}, ttl_hours=1)
+
+    assert cache.get("expired", max_age_hours=0) is None
 
 
 def test_get_northbound_flow_signal_bullish(monkeypatch):

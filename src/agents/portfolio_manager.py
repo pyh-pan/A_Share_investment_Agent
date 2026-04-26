@@ -196,6 +196,100 @@ def extract_target_price(text: str, current_price: float = 0) -> float:
     return None
 
 
+def build_forced_decision(engine_result: dict, agent_signals: dict, current_price: float = None) -> dict:
+    """Build a deterministic decision when LLM output is missing or invalid."""
+    base_decision = normalize_action(engine_result.get("base_decision", "hold"))
+    weighted_score = engine_result.get("weighted_score", 0)
+
+    def _sig(weight_key: str, default_signal: str = "neutral") -> dict:
+        value = agent_signals.get(weight_key, {}) if isinstance(agent_signals, dict) else {}
+        return {
+            "signal": value.get("signal", default_signal),
+            "confidence": value.get("confidence", 0.0),
+        }
+
+    technical = _sig("technical")
+    fundamentals = _sig("fundamentals")
+    sentiment = _sig("sentiment")
+    valuation = _sig("valuation")
+    macro = _sig("macro")
+
+    return {
+        "action": base_decision,
+        "quantity": 0,
+        "confidence": 0.5,
+        "target_price": current_price if base_decision == "buy" and current_price else None,
+        "risk_score": 0.5,
+        "agent_signals": [
+            {"agent_name": "technical_analysis", **technical},
+            {"agent_name": "fundamental_analysis", **fundamentals},
+            {"agent_name": "sentiment_analysis", **sentiment},
+            {"agent_name": "valuation_analysis", **valuation},
+            {"agent_name": "risk_management", "signal": "neutral", "confidence": 1.0},
+            {"agent_name": "macro_analyst_agent", **macro},
+            {"agent_name": "macro_news_agent", "signal": "neutral", "confidence": 0.0},
+        ],
+        "reasoning": (
+            "LLM 输出缺失或无效，使用确定性加权评分生成保守决策: "
+            f"{base_decision} (weighted_score={weighted_score})"
+        ),
+    }
+
+
+def enrich_prompt_with_memory(user_prompt: str, memory_prompt: str) -> str:
+    if not memory_prompt or not memory_prompt.strip():
+        return user_prompt
+    return f"{user_prompt}\n\n历史决策记忆（仅作校准参考）：\n{memory_prompt.strip()}"
+
+
+def is_valid_decision_json(value) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required_fields = {
+        "action",
+        "quantity",
+        "confidence",
+        "target_price",
+        "risk_score",
+        "agent_signals",
+        "reasoning",
+    }
+    if not required_fields.issubset(value.keys()):
+        return False
+    if normalize_action(value.get("action")) not in {"buy", "sell", "hold"}:
+        return False
+    return isinstance(value.get("agent_signals"), list)
+
+
+def calculate_transaction_costs(action: str, quantity: int, price: float, expected_return: float = 0.0) -> dict:
+    action = normalize_action(action)
+    quantity = max(int(quantity or 0), 0)
+    price = float(price or 0.0)
+    expected_return = float(expected_return or 0.0)
+    if action == "buy":
+        cost_rate = 0.00025 + 0.00002
+    elif action == "sell":
+        cost_rate = 0.00025 + 0.001 + 0.00002
+    else:
+        cost_rate = 0.0
+
+    gross_value = quantity * price
+    gross_return = gross_value * expected_return
+    transaction_cost = gross_value * cost_rate
+    net_return = gross_return - transaction_cost
+    return {
+        "action": action,
+        "quantity": quantity,
+        "price": price,
+        "cost_rate": round(cost_rate, 5),
+        "gross_value": round(gross_value, 4),
+        "gross_return": round(gross_return, 4),
+        "transaction_cost": round(transaction_cost, 4),
+        "net_return": round(net_return, 4),
+        "profitable": net_return > 0,
+    }
+
+
 # ──────────────────────────────────────────────
 # Signal extraction from messages & data
 # ──────────────────────────────────────────────
@@ -419,6 +513,16 @@ def portfolio_management_agent(state: AgentState):
             当前股价: {current_price}
 
             请仅输出JSON格式，reasoning字段请使用中文。确保 'agent_signals' 包含系统提示中要求的所有代理。务必填写 target_price 和 risk_score 字段。"""
+    try:
+        from src.tools.memory import get_memory
+
+        memory_prompt = get_memory().get_memory_prompt(state["data"])
+    except Exception as exc:
+        logger.warning(f"读取决策记忆失败，跳过记忆注入: {exc}")
+        memory_prompt = ""
+
+    user_message_content = enrich_prompt_with_memory(user_message_content, memory_prompt)
+
     user_message = {
         "role": "user",
         "content": user_message_content
@@ -440,48 +544,17 @@ def portfolio_management_agent(state: AgentState):
     if llm_response_content is None:
         show_agent_reasoning(
             agent_name, "LLM 调用失败，使用确定性加权评分作为默认决策")
-        llm_response_content = json.dumps({
-            "action": engine_result["base_decision"],
-            "quantity": 0,
-            "confidence": 0.5,
-            "target_price": None,
-            "risk_score": 0.5,
-            "agent_signals": [
-                {"agent_name": "technical_analysis",
-                    "signal": agent_signals.get("technical", {}).get("signal", "neutral"),
-                    "confidence": agent_signals.get("technical", {}).get("confidence", 0.0)},
-                {"agent_name": "fundamental_analysis",
-                    "signal": agent_signals.get("fundamentals", {}).get("signal", "neutral"),
-                    "confidence": agent_signals.get("fundamentals", {}).get("confidence", 0.0)},
-                {"agent_name": "sentiment_analysis",
-                    "signal": agent_signals.get("sentiment", {}).get("signal", "neutral"),
-                    "confidence": agent_signals.get("sentiment", {}).get("confidence", 0.0)},
-                {"agent_name": "valuation_analysis",
-                    "signal": agent_signals.get("valuation", {}).get("signal", "neutral"),
-                    "confidence": agent_signals.get("valuation", {}).get("confidence", 0.0)},
-                {"agent_name": "risk_management",
-                    "signal": "hold", "confidence": 1.0},
-                {"agent_name": "macro_analyst_agent",
-                    "signal": agent_signals.get("macro", {}).get("signal", "neutral"),
-                    "confidence": agent_signals.get("macro", {}).get("confidence", 0.0)},
-                {"agent_name": "macro_news_agent",
-                    "signal": "unavailable_or_llm_error", "confidence": 0.0}
-            ],
-            "reasoning": f"LLM API 错误，基于确定性加权评分决策: {engine_result['base_decision']} (得分={engine_result['weighted_score']})"
-        })
+        decision_json = build_forced_decision(engine_result, agent_signals, current_price)
+        llm_response_content = json.dumps(decision_json, ensure_ascii=False)
+    else:
+        try:
+            decision_json = json.loads(llm_response_content)
+        except (json.JSONDecodeError, TypeError):
+            decision_json = build_forced_decision(engine_result, agent_signals, current_price)
+            llm_response_content = json.dumps(decision_json, ensure_ascii=False)
 
-    try:
-        decision_json = json.loads(llm_response_content)
-    except json.JSONDecodeError:
-        decision_json = {
-            "action": engine_result["base_decision"],
-            "quantity": 0,
-            "confidence": 0.5,
-            "target_price": None,
-            "risk_score": 0.5,
-            "agent_signals": [],
-            "reasoning": f"LLM输出解析失败，使用确定性评分决策: {engine_result['base_decision']}"
-        }
+    if not is_valid_decision_json(decision_json):
+        decision_json = build_forced_decision(engine_result, agent_signals, current_price)
         llm_response_content = json.dumps(decision_json, ensure_ascii=False)
 
     decision_json = SignalValidator.validate(decision_json, engine_result)
@@ -504,7 +577,35 @@ def portfolio_management_agent(state: AgentState):
         except (json.JSONDecodeError, TypeError, AttributeError):
             decision_json["risk_score"] = 0.5
 
+    target_price = decision_json.get("target_price")
+    expected_return = 0.0
+    if current_price and target_price:
+        try:
+            expected_return = (float(target_price) - float(current_price)) / float(current_price)
+        except (TypeError, ValueError, ZeroDivisionError):
+            expected_return = 0.0
+    decision_json["transaction_costs"] = calculate_transaction_costs(
+        decision_json.get("action", "hold"),
+        decision_json.get("quantity", 0),
+        current_price,
+        expected_return,
+    )
+
     llm_response_content = json.dumps(decision_json, ensure_ascii=False)
+
+    try:
+        from src.tools.memory import get_memory
+
+        get_memory().store_decision(
+            state_data=state["data"],
+            decision=decision_json.get("action", "hold"),
+            confidence=SignalWeightingEngine.parse_confidence(
+                decision_json.get("confidence", 0.5)
+            ),
+            reasoning=decision_json.get("reasoning", ""),
+        )
+    except Exception as exc:
+        logger.warning(f"写入决策记忆失败，继续返回决策: {exc}")
 
     final_decision_message = HumanMessage(
         content=llm_response_content,

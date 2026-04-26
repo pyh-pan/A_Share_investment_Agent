@@ -6,6 +6,7 @@ from src.tools.news_crawler import (
     get_news_sentiment_details,
     get_forum_sentiment,
 )
+from src.tools.api import get_margin_trading_sentiment
 from src.utils.logging_config import setup_logger
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
 import json
@@ -52,6 +53,7 @@ def sentiment_agent(state: AgentState):
 
     # 获取新闻数据并分析情感，添加 date 参数
     news_list = get_stock_news(symbol, max_news=num_of_news, date=end_date)
+    margin_payload = get_margin_trading_sentiment(symbol)
 
     # 过滤7天内的新闻（只对有publish_time字段的新闻进行过滤）
     cutoff_date = datetime.now() - timedelta(days=7)
@@ -81,6 +83,7 @@ def sentiment_agent(state: AgentState):
                 "summary": "没有可用的近期新闻用于情绪分析。",
                 "overall_score": 0.0,
                 "decay_weighted_score": 0.0,
+                "margin_trading_sentiment": margin_payload,
             },
             "news_count": 0,
             "status": "unavailable",
@@ -109,6 +112,15 @@ def sentiment_agent(state: AgentState):
             weighted_score = weighted_score * 0.8 + float(forum_payload.get("score", 0.0)) * 0.2
             weighted_score = max(-1.0, min(1.0, weighted_score))
 
+        if margin_payload.get("data_available"):
+            margin_score = {
+                "bullish": 1.0,
+                "neutral": 0.0,
+                "bearish": -1.0,
+            }.get(margin_payload.get("signal"), 0.0)
+            weighted_score = weighted_score * 0.9 + margin_score * 0.1
+            weighted_score = max(-1.0, min(1.0, weighted_score))
+
         # 根据情感分数生成交易信号和置信度
         if weighted_score >= 0.5:
             signal = "bullish"
@@ -134,6 +146,7 @@ def sentiment_agent(state: AgentState):
                     "negative": sum(1 for s in sentiment_payload.get("news_scores", []) if float(s.get("sentiment_score", 0)) < -0.2),
                 },
                 "forum_sentiment": forum_payload,
+                "margin_trading_sentiment": margin_payload,
             },
             "news_count": len(recent_news),
             "status": "ok",

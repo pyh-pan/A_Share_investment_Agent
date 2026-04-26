@@ -39,23 +39,23 @@ ENV/
 
 # OS
 .DS_Store
-Thumbs.db 
+Thumbs.db
 
 # Other common files to ignore
 node_modules/
 dist/
-.DS_Store 
+.DS_Store
 
 # New additions
 .venv/
 venv/
-ENV/ 
+ENV/
 
 # Reference directory
-reference/ 
+reference/
 
 # Documentation
-docs/ 
+docs/
 structure.drawio
 
 # logs
@@ -67,9 +67,15 @@ src/data/sentiment_cache.json
 
 # docs
 docs/
+!docs/
+!docs/superpowers/
+!docs/superpowers/plans/
+!docs/superpowers/plans/*.md
 
 # cache
 cache/
+!src/tools/cache/
+!src/tools/cache/*.py
 
 # temp
 temp/

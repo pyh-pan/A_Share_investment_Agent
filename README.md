@@ -10,9 +10,9 @@
 
 - **多轮多空辩论** — 看多/看空研究员交替辩论（最多 5 轮），辩论室 LLM 裁判综合评判
 - **确定性信号加权** — `SignalWeightingEngine` 在代码中计算加权评分（估值 30% / 基本面 25% / 技术 20% / 宏观 15% / 情绪 10%），LLM 仅做定性调整
-- **A 股专属指标** — 北向资金流向、KDJ (9,3,3)、MACD 顶/底背离、WACC 动态折现率
+- **A 股专属指标** — 北向资金流向、融资融券情绪、KDJ (9,3,3)、MACD 顶/底背离、WACC 动态折现率
 - **四级新闻源** — 东方财富直连 API → 东方财富 + 新浪 + 同花顺 → Playwright 搜索引擎 → akshare 兜底
-- **SQLite 缓存 + 多源降级** — `DataSourceManager` 统一缓存（行情 4h / 财务 24h），akshare → tushare → baostock 降级链
+- **SQLite 缓存 + 多源降级** — `SimpleCache` + `DataSourceManager` 统一缓存（行情 4h / 财务 24h），支持 `prewarm_symbol_cache()` 预热关键数据，akshare → tushare → baostock 降级链
 - **反反爬** — `curl_cffi` Chrome TLS 指纹模拟 + 域名级限速 + 指数退避重试
 
 ---
@@ -43,15 +43,15 @@
 |---|---|
 | 市场数据 | 入口节点，获取行情/财务/新闻数据，通过 `DataSourceManager` 缓存 |
 | 技术分析 | ADX 趋势、MACD 背离、KDJ 超买超卖、布林带、RSI、OBV 等 |
-| 基本面分析 | ROE、净利率、营收增长、资产负债率，按行业阈值评分 |
-| 情绪分析 | 四级新闻源 + 股吧情绪 + LLM 评分，含时间衰减加权 |
-| 估值分析 | DCF 估值 + 所有者收益估值，WACC 动态计算 |
+| 基本面分析 | ROE、净利率、营收增长、资产负债率，按行业阈值、同业分位和多期趋势评分 |
+| 情绪分析 | 四级新闻源 + 股吧情绪 + 融资融券情绪 + LLM 评分，含时间衰减加权 |
+| 估值分析 | DCF 估值 + 所有者收益估值，WACC 动态计算，含 PEG、行业可比倍数和净债务调整 |
 | 宏观新闻 | 沪深 300 指数新闻摘要（独立并行路径） |
 | 看多/看空研究员 | 基于分析师报告交替辩论，生成对立论点并反驳 |
 | 辩论室 | LLM 裁判评估多空观点，输出 bearish/bullish + 置信度 |
-| 风险管理 | VaR、最大回撤、波动率、压力测试 |
-| 宏观分析 | GDP/CPI/PMI/M2/LPR 宏观指标 + 行业新闻 |
-| 投资组合管理 | `SignalWeightingEngine` 确定性加权 + LLM 定性调整，最终决策 |
+| 风险管理 | VaR、CVaR/Expected Shortfall、最大回撤、波动率、Beta、流动性、T+1 约束和压力测试 |
+| 宏观分析 | GDP/CPI/PMI/M2/LPR 宏观指标 + 行业新闻 + 确定性宏观环境评分 |
+| 投资组合管理 | `SignalWeightingEngine` 确定性加权 + LLM 定性调整，含无效 LLM 输出回退、交易成本和决策记忆 |
 
 ---
 
@@ -158,6 +158,7 @@ A_Share_investment_Agent/
 | 财务指标 | akshare (新浪) | 东方财富实时 → 新浪日线 | 24h |
 | 财务报表 | akshare (新浪) | — | 24h |
 | 北向资金 | akshare `stock_hsgt_north_net_flow_in_em` | — | 4h |
+| 融资融券 | akshare `stock_margin_detail_szse/sse` | — | 4h |
 | 宏观指标 | akshare (GDP/CPI/PMI/M2/LPR) | — | 24h |
 
 ### 新闻
@@ -173,10 +174,22 @@ A_Share_investment_Agent/
 
 ---
 
+## 路线图状态（2026-04-26）
+
+- 已恢复 `src/tools/cache/db_cache.py` 的 `SimpleCache`，并通过 `DataSourceManager(cache=...)` 支持缓存注入。
+- 已新增 `prewarm_symbol_cache()`，可 best-effort 预热行情、财务、北向、宏观和融资融券等关键数据。
+- 估值已具备动态 WACC、有界负增长处理、PEG、行业可比倍数估值和净债务/企业价值调整。
+- 宏观模块已接入宏观指标、行业新闻和确定性宏观环境评分；LLM 不可用时可回退到真实宏观证据。
+- 基本面模块已接入行业阈值、同业分位 helper 和多期趋势分析；剩余工作是自动构建真实同业样本。
+- 情绪模块已接入时间衰减、股吧情绪和融资融券杠杆情绪；剩余工作是扩展到雪球、微博等更广泛平台。
+- 风险管理已接入 CVaR、Beta、流动性、T+1 约束和更丰富压力测试；投资组合管理已接入交易成本、决策记忆、outcome 更新 helper，并在 LLM 输出缺失/无效时回退到确定性加权决策。
+
+---
+
 ## 致谢
 
 - [ai-hedge-fund](https://github.com/virattt/ai-hedge-fund) — 本项目原始灵感来源
-- [TradingAgents-CN](https://github.com/hsliuping/TradingAgents-CN) — 多源降级、防反爬、KDJ/MACD 背离、ChromaDB 记忆等思路参考
+- [TradingAgents-CN](https://github.com/hsliuping/TradingAgents-CN) — 多源降级、防反爬、KDJ/MACD 背离、ChromaDB 记忆等思路参考；记忆系统以可选依赖方式接入投资组合工作流
 
 ---
 

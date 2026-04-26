@@ -11,8 +11,8 @@ logger = setup_logger("data_source_manager")
 class DataSourceManager:
     """Simple multi-source fallback manager with local cache."""
 
-    def __init__(self) -> None:
-        self.cache = SimpleCache()
+    def __init__(self, cache: Optional[SimpleCache] = None) -> None:
+        self.cache = cache or SimpleCache()
 
     def fetch_with_fallback(
         self,

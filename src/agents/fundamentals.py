@@ -9,6 +9,13 @@ import json
 # 初始化 logger
 logger = setup_logger('fundamentals_agent')
 
+LOWER_IS_BETTER_METRICS = {
+    "debt_to_equity",
+    "pe_ratio",
+    "price_to_book",
+    "price_to_sales",
+}
+
 INDUSTRY_THRESHOLDS = {
     "银行": {
         "return_on_equity": (0.10, 0.13),
@@ -78,6 +85,90 @@ INDUSTRY_THRESHOLDS = {
 ##### Fundamental Agent #####
 
 
+def _valid_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def analyze_metric_trend(metrics_history, metric_name):
+    """Analyze multi-period metric direction with a 20% materiality threshold."""
+    values = [
+        item.get(metric_name)
+        for item in metrics_history or []
+        if isinstance(item, dict) and _valid_number(item.get(metric_name))
+    ]
+
+    if len(values) < 2 or values[0] == 0:
+        return {
+            "metric": metric_name,
+            "signal": "neutral",
+            "trend": "insufficient_data",
+            "change_pct": None,
+            "data_available": False,
+            "reasoning": "Insufficient metric history for trend analysis",
+        }
+
+    change_pct = round((values[-1] - values[0]) / abs(values[0]), 4)
+    if change_pct > 0.20:
+        signal = "bullish"
+        trend = "improving"
+    elif change_pct < -0.20:
+        signal = "bearish"
+        trend = "declining"
+    else:
+        signal = "neutral"
+        trend = "stable"
+
+    return {
+        "metric": metric_name,
+        "signal": signal,
+        "trend": trend,
+        "change_pct": change_pct,
+        "start_value": values[0],
+        "end_value": values[-1],
+        "periods": len(values),
+        "data_available": True,
+        "reasoning": f"{metric_name} changed {change_pct:.1%} over {len(values)} periods",
+    }
+
+
+def calculate_peer_percentile_signal(value, peer_values, higher_is_better=True):
+    """Compare a metric against peers and convert percentile rank into a signal."""
+    peers = [peer for peer in peer_values or [] if _valid_number(peer)]
+    if not _valid_number(value) or not peers:
+        return {
+            "signal": "neutral",
+            "percentile": None,
+            "data_available": False,
+            "reasoning": "Insufficient peer data for percentile comparison",
+        }
+
+    percentile = round(sum(peer <= value for peer in peers) / len(peers), 4)
+    if higher_is_better:
+        if percentile > 0.70:
+            signal = "bullish"
+        elif percentile < 0.30:
+            signal = "bearish"
+        else:
+            signal = "neutral"
+    else:
+        if percentile < 0.30:
+            signal = "bullish"
+        elif percentile > 0.70:
+            signal = "bearish"
+        else:
+            signal = "neutral"
+
+    direction = "higher" if higher_is_better else "lower"
+    return {
+        "signal": signal,
+        "percentile": percentile,
+        "peer_count": len(peers),
+        "higher_is_better": higher_is_better,
+        "data_available": True,
+        "reasoning": f"Value ranks at peer percentile {percentile:.0%}; {direction} is better",
+    }
+
+
 @agent_endpoint("fundamentals", "基本面分析师，分析公司财务指标、盈利能力和增长潜力")
 def fundamentals_agent(state: AgentState):
     """Responsible for fundamental analysis"""
@@ -87,6 +178,8 @@ def fundamentals_agent(state: AgentState):
     metrics = data["financial_metrics"][0]
     industry = data.get("industry_classification", "default")
     thresholds_by_industry = INDUSTRY_THRESHOLDS.get(industry, INDUSTRY_THRESHOLDS["default"])
+    metrics_history = data.get("metrics_history")
+    industry_peer_metrics = data.get("industry_peer_metrics") or {}
 
     # Initialize signals list for different fundamental aspects
     signals = []
@@ -212,6 +305,34 @@ def fundamentals_agent(state: AgentState):
             f"市销率: {price_to_sales:.2f}" if price_to_sales else "市销率: N/A"
         ) + f"，行业: {industry}"
     }
+
+    trend_metrics = [
+        "return_on_equity",
+        "net_margin",
+        "revenue_growth",
+        "earnings_growth",
+        "book_value_growth",
+    ]
+    if metrics_history:
+        reasoning["trend_analysis"] = {
+            metric_name: analyze_metric_trend(metrics_history, metric_name)
+            for metric_name in trend_metrics
+            if any(
+                isinstance(item, dict) and item.get(metric_name) is not None
+                for item in metrics_history
+            )
+        }
+
+    if industry_peer_metrics:
+        reasoning["peer_percentile_analysis"] = {
+            metric_name: calculate_peer_percentile_signal(
+                metrics.get(metric_name),
+                peer_values,
+                higher_is_better=metric_name not in LOWER_IS_BETTER_METRICS,
+            )
+            for metric_name, peer_values in industry_peer_metrics.items()
+            if metric_name in metrics
+        }
 
     # Determine overall signal
     bullish_signals = signals.count('bullish')

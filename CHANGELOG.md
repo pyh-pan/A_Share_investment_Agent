@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [Unreleased] — 2026-04-26
+
+### Roadmap Execution: Macro, Fundamentals, Margin, Costs, and Outcomes
+
+Macro analysis now has deterministic `score_macro_environment()` evidence built from real macro indicators, and uses that evidence as both LLM prompt context and fallback output.
+
+Fundamentals now support optional peer percentile scoring and multi-period metric trend analysis, so deteriorating ROE/revenue/debt trends can affect the signal even when the latest metric still passes a static threshold.
+
+Sentiment now incorporates margin-trading leverage sentiment via `get_margin_trading_sentiment()`, and `prewarm_symbol_cache()` can best-effort warm core symbol data including prices, financials, northbound flow, macro indicators, and margin trading.
+
+Portfolio decisions now include A-share transaction cost modeling and net-return estimates. Decision memory also has best-effort outcome reflection helpers for updating stored decisions once realized returns are available.
+
+Documentation was synchronized with the implementation status in `AGENTS.md`, `README.md`, and this changelog, including the rule that docs must be checked after every code change.
+
+### Roadmap Execution: Cache, Risk, Valuation, and Memory
+
+Restored the missing cache package: `src/tools/cache/db_cache.py` now provides `SimpleCache`, and `DataSourceManager` supports injected cache instances for deterministic tests.
+
+Risk management now emits CVaR/Expected Shortfall, beta risk, liquidity risk, T+1 settlement constraints, and beta/volatility-aware stress scenarios.
+
+Valuation now includes PEG diagnostics, industry-threshold comparable valuation, and net-debt adjustment from enterprise value to equity value when cash/debt fields are available.
+
+Portfolio management now has deterministic forced fallback for missing or invalid LLM output and best-effort decision-memory prompt injection/storage.
+
+Verification commands used:
+
+```bash
+PYTHONPATH=. pytest tests/unit -q
+PYTHONPATH=. python3 -c "import src.main"
+PYTHONPATH=. python3 -m compileall src tests
+git diff --check
+```
+
+---
+
 ## [Unreleased] — 2026-04-18
 
 ### Portfolio Manager: Deterministic Signal Weighting Engine

@@ -10,6 +10,153 @@ from src.tools.openrouter_config import get_chat_completion_with_validation
 logger = setup_logger('macro_analyst_agent')
 
 
+def _extract_macro_value(macro_indicators: dict, metric: str):
+    item = macro_indicators.get(metric)
+    if not isinstance(item, dict):
+        return None
+    value = item.get("value")
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        import re
+        match = re.search(r"-?\d+(?:\.\d+)?", value.replace(",", ""))
+        if match:
+            try:
+                return float(match.group(0))
+            except ValueError:
+                return None
+    return None
+
+
+def score_macro_environment(macro_indicators: dict) -> dict:
+    """Deterministically score China's macro backdrop for A-share stock impact."""
+    if not macro_indicators:
+        return {
+            "macro_environment": "neutral",
+            "impact_on_stock": "neutral",
+            "score": 0,
+            "key_factors": [],
+            "data_available": False,
+            "reasoning": "宏观指标不可用，返回中性判断。",
+        }
+
+    score = 0
+    key_factors = []
+
+    gdp = _extract_macro_value(macro_indicators, "gdp_growth")
+    if gdp is not None:
+        if gdp >= 5.0:
+            score += 2
+            key_factors.append(f"GDP增速{gdp:.1f}%处于较强区间")
+        elif gdp >= 4.0:
+            score += 1
+            key_factors.append(f"GDP增速{gdp:.1f}%保持温和扩张")
+        elif gdp < 3.5:
+            score -= 2
+            key_factors.append(f"GDP增速{gdp:.1f}%偏弱")
+        else:
+            score -= 1
+            key_factors.append(f"GDP增速{gdp:.1f}%低于稳健扩张水平")
+
+    pmi = _extract_macro_value(macro_indicators, "pmi")
+    if pmi is not None:
+        if pmi >= 51.0:
+            score += 2
+            key_factors.append(f"PMI {pmi:.1f}显示制造业扩张")
+        elif pmi >= 50.0:
+            score += 1
+            key_factors.append(f"PMI {pmi:.1f}位于荣枯线上方")
+        elif pmi < 49.0:
+            score -= 2
+            key_factors.append(f"PMI {pmi:.1f}显示明显收缩")
+        else:
+            score -= 1
+            key_factors.append(f"PMI {pmi:.1f}低于荣枯线")
+
+    m2 = _extract_macro_value(macro_indicators, "m2_growth")
+    if m2 is not None:
+        if 7.0 <= m2 <= 11.0:
+            score += 1
+            key_factors.append(f"M2增速{m2:.1f}%提供流动性支持")
+        elif m2 < 6.0:
+            score -= 1
+            key_factors.append(f"M2增速{m2:.1f}%显示流动性偏弱")
+        elif m2 > 13.0:
+            score -= 1
+            key_factors.append(f"M2增速{m2:.1f}%过快，可能加大通胀或政策收紧压力")
+
+    cpi = _extract_macro_value(macro_indicators, "cpi")
+    if cpi is not None:
+        if 0.0 <= cpi <= 3.0:
+            score += 1
+            key_factors.append(f"CPI {cpi:.1f}%处于温和区间")
+        elif cpi > 3.5:
+            score -= 2
+            key_factors.append(f"CPI {cpi:.1f}%偏高，压制政策宽松空间")
+        elif cpi < 0.0:
+            score -= 1
+            key_factors.append(f"CPI {cpi:.1f}%显示通缩压力")
+        else:
+            score -= 1
+            key_factors.append(f"CPI {cpi:.1f}%略高，需关注通胀压力")
+
+    lpr = _extract_macro_value(macro_indicators, "lpr")
+    if lpr is not None:
+        if lpr <= 3.5:
+            score += 1
+            key_factors.append(f"LPR {lpr:.2f}%处于相对宽松水平")
+        elif lpr >= 4.5:
+            score -= 1
+            key_factors.append(f"LPR {lpr:.2f}%融资成本偏高")
+
+    data_available = bool(key_factors)
+    if not data_available:
+        return {
+            "macro_environment": "neutral",
+            "impact_on_stock": "neutral",
+            "score": 0,
+            "key_factors": [],
+            "data_available": False,
+            "reasoning": "宏观指标不可用，返回中性判断。",
+        }
+
+    if score >= 3:
+        environment = "positive"
+    elif score <= -3:
+        environment = "negative"
+    else:
+        environment = "neutral"
+
+    return {
+        "macro_environment": environment,
+        "impact_on_stock": environment,
+        "score": score,
+        "key_factors": key_factors[:5],
+        "data_available": True,
+        "reasoning": f"确定性宏观评分为{score}分；" + "；".join(key_factors[:5]) + "。",
+    }
+
+
+def _with_deterministic_score(analysis_result: dict, deterministic_score: dict) -> dict:
+    result = dict(analysis_result)
+    result["deterministic_macro_score"] = deterministic_score
+    return result
+
+
+def _fallback_macro_analysis(deterministic_score: dict, reason: str) -> dict:
+    fallback = dict(deterministic_score)
+    fallback["reasoning"] = f"{reason}；使用确定性宏观评分作为回退。{deterministic_score['reasoning']}"
+    fallback["deterministic_macro_score"] = deterministic_score
+    return fallback
+
+
+def _is_valid_macro_analysis(analysis_result: dict) -> bool:
+    required = {"macro_environment", "impact_on_stock", "key_factors", "reasoning"}
+    return isinstance(analysis_result, dict) and required.issubset(analysis_result)
+
+
 @agent_endpoint("macro_analyst", "宏观分析师，分析宏观经济环境对目标股票的影响")
 def macro_analyst_agent(state: AgentState):
     """Responsible for macro analysis"""
@@ -68,25 +215,21 @@ def get_macro_news_analysis(macro_indicators: dict, industry_news: list, symbol:
     Returns:
         dict: 宏观分析结果，包含环境评估、对股票的影响、关键因素和详细推理
     """
+    deterministic_score = score_macro_environment(macro_indicators)
     available_values = [
         item.get("value")
         for item in macro_indicators.values()
         if isinstance(item, dict)
     ]
     if not any(v is not None for v in available_values) and not industry_news:
-        return {
-            "macro_environment": "neutral",
-            "impact_on_stock": "neutral",
-            "key_factors": [],
-            "reasoning": "宏观指标与行业新闻均不可用，返回中性判断。",
-        }
+        return _fallback_macro_analysis(deterministic_score, "宏观指标与行业新闻均不可用")
 
     # 检查缓存
     import os
     cache_file = "src/data/macro_analysis_cache.json"
     os.makedirs(os.path.dirname(cache_file), exist_ok=True)
 
-    prompt_version = "macro_v2_indicators_industry_news"
+    prompt_version = "macro_v3_deterministic_score"
     news_key = json.dumps(
         {
             "version": prompt_version,
@@ -112,7 +255,7 @@ def get_macro_news_analysis(macro_indicators: dict, industry_news: list, symbol:
                 cache = json.load(f)
                 if news_key in cache:
                     logger.info("使用缓存的宏观分析结果")
-                    return cache[news_key]
+                    return _with_deterministic_score(cache[news_key], deterministic_score)
         except Exception as e:
             logger.error(f"读取宏观分析缓存出错: {e}")
             cache = {}
@@ -150,6 +293,7 @@ def get_macro_news_analysis(macro_indicators: dict, industry_news: list, symbol:
             f"股票代码：{symbol}\n"
             f"所属行业：{industry}\n\n"
             f"宏观指标（主依据）：\n{json.dumps(macro_indicators, ensure_ascii=False)}\n\n"
+            f"确定性宏观评分（必须作为基线证据）：\n{json.dumps(deterministic_score, ensure_ascii=False)}\n\n"
             f"行业新闻（补充）：\n{news_content if news_content else '无'}\n\n"
             "请给出宏观环境与对目标股票影响的结论。"
         ),
@@ -162,18 +306,14 @@ def get_macro_news_analysis(macro_indicators: dict, industry_news: list, symbol:
             [system_message, user_message],
             data_context={
                 "macro_indicators": macro_indicators,
+                "deterministic_macro_score": deterministic_score,
                 "industry_news_titles": [n.get("title", "") for n in industry_news[:20]],
             },
             validation_mode="warn",
         )
         if result is None:
             logger.error("LLM分析失败，无法获取宏观分析结果")
-            return {
-                "macro_environment": "neutral",
-                "impact_on_stock": "neutral",
-                "key_factors": [],
-                "reasoning": "LLM分析失败，无法获取宏观分析结果"
-            }
+            return _fallback_macro_analysis(deterministic_score, "LLM分析失败，无法获取宏观分析结果")
 
         # 解析JSON结果
         try:
@@ -191,21 +331,17 @@ def get_macro_news_analysis(macro_indicators: dict, industry_news: list, symbol:
                 except:
                     # 如果仍然失败，返回默认结果
                     logger.error("无法解析代码块中的JSON结果")
-                    return {
-                        "macro_environment": "neutral",
-                        "impact_on_stock": "neutral",
-                        "key_factors": [],
-                        "reasoning": "无法解析LLM返回的JSON结果"
-                    }
+                    return _fallback_macro_analysis(deterministic_score, "无法解析代码块中的JSON结果")
             else:
                 # 如果没有找到JSON，返回默认结果
                 logger.error("LLM未返回有效的JSON格式结果")
-                return {
-                    "macro_environment": "neutral",
-                    "impact_on_stock": "neutral",
-                    "key_factors": [],
-                    "reasoning": "LLM未返回有效的JSON格式结果"
-                }
+                return _fallback_macro_analysis(deterministic_score, "LLM未返回有效的JSON格式结果")
+
+        if not _is_valid_macro_analysis(analysis_result):
+            logger.error("LLM返回的宏观分析缺少必要字段")
+            return _fallback_macro_analysis(deterministic_score, "LLM返回的宏观分析缺少必要字段")
+
+        analysis_result = _with_deterministic_score(analysis_result, deterministic_score)
 
         # 缓存结果
         cache[news_key] = analysis_result
@@ -220,9 +356,4 @@ def get_macro_news_analysis(macro_indicators: dict, industry_news: list, symbol:
 
     except Exception as e:
         logger.error(f"宏观分析出错: {e}")
-        return {
-            "macro_environment": "neutral",
-            "impact_on_stock": "neutral",
-            "key_factors": [],
-            "reasoning": f"分析过程中出错: {str(e)}"
-        }
+        return _fallback_macro_analysis(deterministic_score, f"分析过程中出错: {str(e)}")

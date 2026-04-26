@@ -33,6 +33,10 @@ poetry run flake8 .
 poetry run pytest
 ```
 
+## Documentation Sync Rule
+
+After every code change, check whether project documentation must be updated before considering the task complete. At minimum, review `AGENTS.md`, `README.md`, and `CHANGELOG.md` against the actual code diff and update roadmap statuses, completed items, remaining gaps, commands, architecture notes, and verification evidence so documentation stays current with implementation.
+
 ## Architecture
 
 The system is a **LangGraph StateGraph** workflow defined in `src/main.py`. All agents share an `AgentState` (defined in `src/agents/state.py`) containing `messages`, `data`, and `metadata` dicts that merge across nodes.
@@ -114,17 +118,17 @@ The following improvements are planned, ordered by impact and importance within 
 
 *Critical issues that produce fundamentally wrong analysis results. Fix immediately.*
 
-- [ ] **Macro analyst data source mismatch** — `macro_analyst.py` fetches *stock-specific* news but tries to analyze the *macro economy*. Should integrate real macro data: GDP, CPI, PMI, M2, LPR, yield curves. akshare provides `macro_china_gdp`, `macro_china_cpi`, `macro_china_pmi`, etc.
-  *Priority: CRITICAL, Effort: 8-12h*
+- [x] **Macro analyst data source mismatch** — Fixed for the current workflow: `macro_analyst.py` now uses `get_macro_indicators()` for GDP/CPI/PMI/M2/LPR-style inputs, `get_industry_news()` for industry context, and deterministic `score_macro_environment()` evidence as both LLM prompt context and fallback output. Tests cover deterministic scoring and non-stock-specific macro fallback behavior. Remaining future refinement: yield-curve/liquidity validation and broader macro data quality checks.
+  *Completed: 2026-04-26; Future refinement: 4-8h*
 
-- [ ] **Valuation model too crude** — DCF discount rate hardcoded at 10% (should compute WACC dynamically); negative earnings growth floored to 0 (overvalues declining companies); missing comparable company valuation (industry P/E, P/B, EV/EBITDA); missing PEG ratio; enterprise value vs equity value conflated (FCF compared directly to market cap without subtracting net debt).
-  *Priority: CRITICAL, Effort: 16-24h*
+- [x] **Valuation model too crude** — Improved in `src/agents/valuation.py`: dynamic WACC is used for DCF/owner-earnings, growth is bounded instead of flooring all negative growth to zero, PEG diagnostics are included, industry-threshold PE/PB/PS comparable valuation is averaged when available, and net debt adjusts enterprise value to equity value when cash/debt fields are present. Remaining future refinement: true peer-set EV/EBITDA/comparable-company data instead of static industry threshold proxies.
+  *Completed: 2026-04-26; Future refinement: 8-12h*
 
-- [ ] **Fundamentals thresholds are industry-agnostic** — ROE>15%, net margin>20%, debt ratio<50% applied uniformly across all sectors. Banks, tech, brokerages all have different norms. Need industry classification and relative percentile comparison.
-  *Priority: CRITICAL, Effort: 12-18h*
+- [x] **Fundamentals thresholds are industry-agnostic** — Improved in `src/agents/fundamentals.py`: market data carries industry classification, static industry threshold profiles are applied, optional peer percentile comparison is available through `calculate_peer_percentile_signal()`, and `analyze_metric_trend()` penalizes multi-period deterioration even when absolute metrics remain above thresholds. Remaining future refinement: populate real peer universes automatically instead of relying on optional peer metric inputs.
+  *Completed: 2026-04-26; Future refinement: 6-10h*
 
-- [ ] **Sentiment analysis too narrow** — Only analyzes news articles; missing retail investor sentiment (Eastmoney guba, Xueqiu/Snowball, Weibo); all news collapsed to single -1~1 score losing structural information; no temporal decay weighting.
-  *Priority: CRITICAL, Effort: 24-36h*
+- [ ] **Sentiment analysis too narrow** — Partially completed: sentiment analysis now includes temporal decay weighting, Eastmoney guba/forum sentiment, and margin-trading leverage sentiment from `get_margin_trading_sentiment()`. Remaining work: broader platforms such as Xueqiu/Snowball and Weibo, plus richer structural decomposition of news/forum/margin sentiment instead of a single aggregate score.
+  *Priority: CRITICAL, Effort: 14-24h remaining*
 
 - [x] **Missing KDJ indicator** — Implemented in `src/agents/technicals.py` via `calculate_kdj()`. KDJ (9,3,3) signals: bullish when J<0 and K<20 (oversold), bearish when J>100 and K>80 (overbought).
   *Completed: 2026-04-18*
@@ -135,8 +139,8 @@ The following improvements are planned, ordered by impact and importance within 
 - [x] **Missing MACD divergence detection** — Implemented in `src/agents/technicals.py` via `detect_macd_divergence()`. Detects top divergence (bearish) and bottom divergence (bullish) over 60-day window.
   *Completed: 2026-04-18*
 
-- [ ] **No forced tool calling mechanism** — LLM sometimes ignores tools and generates hallucinated analysis with fake data. TradingAgents-CN implements code-level fallback: if LLM returns empty tool_calls, Python code directly invokes the data tool and forces LLM to analyze real data.
-  *From TradingAgents-CN, Priority: MEDIUM, Effort: 8-12h*
+- [x] **No forced tool calling / fallback mechanism for final decision** — Implemented for the final portfolio decision in `src/agents/portfolio_manager.py`: if the LLM returns `None`, invalid JSON, or a payload missing required decision fields, `build_forced_decision()` falls back to the deterministic `SignalWeightingEngine` base decision. Remaining future refinement: apply the same tool-enforcement pattern to every upstream data-fetching LLM agent.
+  *Completed: 2026-04-26; Future refinement: 8-12h*
   ```python
   def agent_with_forced_tools(state, tools, prompt, llm):
       response = llm.generate(prompt, tools=tools)
@@ -152,14 +156,14 @@ The following improvements are planned, ordered by impact and importance within 
 
 *Important features that significantly limit system capabilities.*
 
-- [ ] **Missing A-share specific data** — Northbound capital flows (`stock_hsgt_north_net_flow_in_em`), margin trading (`stock_margin_detail_szse/sse`), block trades (`stock_dzjy_sctj`), top 10 shareholders (`stock_gdfx_free_holding_analyse_em`), dragon & tiger list (`stock_lhb_detail_em`), restricted share unlocks (`stock_restricted_release_queue_sina`), shareholder count changes (`stock_zh_a_gdhs`).
-  *Priority: HIGH, Effort: 10-16h*
+- [ ] **Missing A-share specific data** — Northbound capital flows (`stock_hsgt_north_net_flow_in_em`) and margin trading sentiment (`stock_margin_detail_szse/sse`) are implemented. Remaining gaps: block trades (`stock_dzjy_sctj`), top 10 shareholders (`stock_gdfx_free_holding_analyse_em`), dragon & tiger list (`stock_lhb_detail_em`), restricted share unlocks (`stock_restricted_release_queue_sina`), shareholder count changes (`stock_zh_a_gdhs`).
+  *Priority: HIGH, Effort: 8-14h remaining*
 
-- [ ] **Risk management too basic** — Only historical VaR, missing CVaR/Expected Shortfall and Monte Carlo; no Beta coefficient calculation; no liquidity risk assessment; stress testing is trivially simple (flat % declines); T+1 settlement rule completely ignored.
-  *Priority: HIGH, Effort: 12-18h*
+- [x] **Risk management too basic** — Enhanced in `src/agents/risk_manager.py`: adds CVaR/Expected Shortfall, beta-aware market risk, liquidity risk, T+1 settlement constraints, and beta/volatility-aware stress scenarios while preserving the existing VaR/volatility/max-drawdown output. Remaining future refinement: portfolio-level correlation and multi-role risk debate.
+  *Completed: 2026-04-26; Future refinement: 12-20h*
 
-- [ ] **Final decision over-relies on LLM** — ~~Portfolio manager's signal weights exist only in prompt text with no programmatic enforcement.~~ `SignalWeightingEngine` now computes weighted scores deterministically in code (valuation 30%/fundamentals 25%/technical 20%/macro 15%/sentiment 10%). LLM still handles qualitative adjustment and explanation, but no longer controls weight allocation. Remaining gap: LLM can still override the base_decision without justification tracking.
-  *Priority: MEDIUM (downgraded from HIGH), Effort: 4-8h*
+- [x] **Final decision over-relies on LLM** — ~~Portfolio manager's signal weights exist only in prompt text with no programmatic enforcement.~~ `SignalWeightingEngine` now computes weighted scores deterministically in code (valuation 30%/fundamentals 25%/technical 20%/macro 15%/sentiment 10%). The LLM still handles qualitative adjustment and explanation, but invalid or missing LLM output falls back to `build_forced_decision()` and the final payload carries `base_decision`/`base_confidence`/`weighted_score` for auditability.
+  *Completed: 2026-04-26*
 
 - [ ] **Technical analysis gaps** — ~~Missing KDJ indicator (most popular in Chinese markets); no MACD divergence detection (only crossover);~~ turnover rate data available but never used; no support/resistance level identification; no MA5/10/20/60 support analysis; first-layer indicators (MACD/RSI/BB/OBV) computed then overwritten by second-layer strategies (dead code).
   *Note: KDJ and MACD divergence now implemented in P0*
@@ -168,24 +172,14 @@ The following improvements are planned, ordered by impact and importance within 
 - [ ] **No anti-scraping protection** — ~~Eastmoney API intermittently returns `RemoteDisconnected` because current requests lack browser TLS fingerprint simulation.~~ `curl_cffi` with Chrome impersonation now implemented in `http_client.py` with per-domain rate limiting and exponential backoff. Remaining gap: still seeing `RemoteDisconnected` on some eastmoney endpoints; `curl_cffi` impersonation may need version updates or fallback tuning.
   *From TradingAgents-CN, Priority: MEDIUM (downgraded from HIGH), Effort: 2-4h (remaining)*
 
-- [ ] **No persistent caching** — ~~System refetches all K-line and financial data on every run, wasting API quota and time.~~ `DataSourceManager` with SQLite-backed cache now integrated for key API functions (`get_northbound_flow`, `get_macro_indicators`, `get_financial_metrics`). Remaining gap: not all data functions use DSM yet; no scheduled sync cron job for pre-warming cache.
-  *From TradingAgents-CN, Priority: MEDIUM (downgraded from HIGH), Effort: 8-12h (remaining)*
+- [ ] **No persistent caching** — ~~System refetches all K-line and financial data on every run, wasting API quota and time.~~ Restored in Task 1: `src/tools/cache/db_cache.py` provides `SimpleCache`, and `DataSourceManager` accepts cache injection while using SQLite-backed cache for key API functions (`get_northbound_flow`, `get_macro_indicators`, `get_financial_metrics`, `get_margin_trading_sentiment`, and related DSM call sites). `prewarm_symbol_cache()` now best-effort warms key symbol data. Remaining gap: not all data functions use DSM yet; no scheduled sync cron job.
+  *From TradingAgents-CN, Priority: MEDIUM (downgraded from HIGH), Effort: 4-8h remaining*
 
-- [ ] **Valuation missing dynamic WACC** — Current DCF uses hardcoded 10% discount rate, overvaluing high-risk stocks and undervaluing low-risk ones. Should calculate WACC dynamically using Beta coefficient.
-  *From TradingAgents-CN, Priority: MEDIUM, Effort: 8-12h*
-  ```python
-  def calculate_wacc(symbol, risk_free_rate=0.03):
-      beta = ak.stock_beta_em(symbol=symbol)  # From akshare
-      market_premium = 0.06  # A-share historical risk premium
-      cost_of_equity = risk_free_rate + beta * market_premium
-      debt_cost = get_debt_cost_from_financials(symbol)
-      debt_ratio = get_debt_ratio(symbol)
-      wacc = cost_of_equity * (1 - debt_ratio) + debt_cost * debt_ratio * 0.75  # Tax shield
-      return max(wacc, 0.08)  # Minimum 8% floor
-  ```
+- [x] **Valuation missing dynamic WACC** — Implemented in `src/tools/api.py` via `calculate_wacc()`, using `calculate_beta()` plus a conservative cost-of-equity/debt blend and 8%-20% bounds. `valuation.py` passes this dynamic WACC into DCF and owner-earnings valuation. Remaining valuation gaps are tracked under the P0 valuation item: PEG, comparables, and net-debt/EV adjustments.
+  *Completed: 2026-04-26*
 
-- [ ] **Missing margin trading data** — Margin trading (融资融券) reflects leverage sentiment: high margin balance = bullish retail sentiment; increasing short selling = bearish. This is A-share specific and currently missing.
-  *From TradingAgents-CN, Priority: MEDIUM, Effort: 2-4h*
+- [x] **Missing margin trading data** — Implemented in `src/tools/api.py` via `get_margin_trading_sentiment()`, using SZSE or SSE margin-detail endpoints based on symbol prefix and returning margin balance change, margin/short ratio, sentiment, numeric signal, and availability flag. `src/agents/sentiment.py` blends the margin signal into final sentiment when available.
+  *Completed: 2026-04-26*
   ```python
   def get_margin_trading_sentiment(symbol):
       # Shenzhen or Shanghai market
@@ -194,7 +188,7 @@ The following improvements are planned, ordered by impact and importance within 
       else:
           df = ak.stock_margin_detail_sse(symbol=symbol)
       margin_change = df.iloc[0]['融资余额'] - df.iloc[1]['融资余额']
-      ms_ratio = df.iloc[0]['融资余额'] / df.iloc[0]['融券余额'] if df.iloc[0]['融券余额'] > 0 else float('inf')
+      ms_ratio = df.iloc[0]['融资余额'] / df.iloc[0]['融券余额'] if df.iloc[0]['融券余额'] > 0 else 9999.0
       # Bullish if margin increasing significantly
       if margin_change > 0 and ms_ratio > 10:
           sentiment = "strong_bullish"
@@ -214,8 +208,8 @@ The following improvements are planned, ordered by impact and importance within 
 
 *Improvements that enhance system robustness, maintainability, and scalability.*
 
-- [ ] **Shenzhen stock financial statements bug** — `get_financial_statements()` hardcodes `sh` prefix for Sina API calls; stocks starting with 0 or 3 (Shenzhen-listed) will fail to retrieve financial data. `_normalize_ak_symbol()` exists but is not used for these calls.
-  *Priority: HIGH, Effort: 1-2h*
+- [x] **Shenzhen stock financial statements bug** — Fixed in `get_financial_statements()`: balance sheet, income statement, and cash-flow calls use `_normalize_ak_symbol()` so Shenzhen symbols (`0`/`3`) are sent as `sz...` and Shanghai symbols as `sh...`.
+  *Completed: 2026-04-26*
   ```python
   # Fix: Use _normalize_ak_symbol instead of hardcoded prefix
   def get_financial_statements(symbol):
@@ -223,47 +217,46 @@ The following improvements are planned, ordered by impact and importance within 
       return ak.stock_financial_report_sina(stock=normalized, symbol="资产负债表")
   ```
 
-- [ ] **`format_decision()` weight mismatch** — Displays 30/35/25 weights for fundamental/valuation/technical, contradicting the 25/30/20 in the system prompt. Need to unify weight definitions across system prompt, code logic, and output display.
-  *Priority: HIGH, Effort: 1-2h*
-  *Note: SignalWeightingEngine now uses consistent weights (30/25/20/15/10), but `format_decision()` display may still show old values*
+- [x] **`format_decision()` weight mismatch** — Fixed and covered by `tests/unit/test_portfolio_costs_p1.py`: `format_decision()` derives displayed labels from `SIGNAL_WEIGHTS` (valuation 30% / fundamentals 25% / technical 20% / macro 15% / sentiment 10%) instead of stale hardcoded text.
+  *Completed: 2026-04-26*
 
 - [ ] **Data pipeline redundancy** — `api.py` pre-computes momentum/volatility/Hurst, `technicals.py` recomputes all of them (with different Hurst algorithm); sentiment agent and macro analyst use same news with different LLM prompts (double-counting risk).
   *Priority: MEDIUM, Effort: 6-10h*
 
-- [ ] **No multi-period trend analysis** — All agents only look at latest period. ROE dropping from 30% to 16% still scores bullish because 16%>15%. Should compare 3-5 year trends and penalize declining trends even if absolute value is above threshold.
-  *Priority: MEDIUM, Effort: 8-12h*
+- [x] **No multi-period trend analysis** — Implemented for fundamentals through `analyze_metric_trend()` and wired into `fundamentals_agent` when `metrics_history` is present. Declining multi-period ROE/revenue-growth/debt trends can now push the evidence bearish even if latest absolute values still pass thresholds. Remaining future refinement: ensure market-data collection always provides 3-5 year metric histories.
+  *Completed: 2026-04-26; Future refinement: 4-8h*
   ```python
   def analyze_metric_trend(metrics_history, metric_name="roe"):
       """Analyze multi-period trend for a metric"""
       values = [m[metric_name] for m in metrics_history[-5:]]  # Last 5 years
       if len(values) < 2:
           return {"trend": "insufficient_data", "signal": "neutral"}
-      
+
       trend_direction = "improving" if values[-1] > values[0] else "declining"
       trend_strength = abs(values[-1] - values[0]) / abs(values[0]) if values[0] != 0 else 0
-      
+
       # Adjust signal based on trend
       if trend_direction == "declining" and trend_strength > 0.20:
           return {"trend": "declining", "signal": "bearish", "reason": f"{metric_name} dropped {trend_strength:.1%} over 5 years"}
       return {"trend": trend_direction, "signal": "neutral"}
   ```
 
-- [ ] **No transaction cost modeling** — A-share costs: commission (~0.025%), stamp tax (0.1% sell-side), transfer fee. Not accounted for in any decision. Should calculate net return after costs before recommending trades.
-  *Priority: MEDIUM, Effort: 4-6h*
+- [x] **No transaction cost modeling** — Implemented in `src/agents/portfolio_manager.py` via `calculate_transaction_costs()`: buy/sell costs include commission and transfer fee, sell also includes stamp tax, and the final decision payload includes gross return, transaction cost, net return, cost rate, and profitability flag.
+  *Completed: 2026-04-26*
   ```python
-  def calculate_net_return(action, quantity, price, expected_return):
-      """Calculate return after A-share transaction costs"""
+  def calculate_transaction_costs(action, quantity, price, expected_return=0.0):
+      """Calculate A-share transaction costs and net expected return."""
       if action == "buy":
           cost_rate = 0.00025 + 0.00002  # Commission + transfer fee
       elif action == "sell":
           cost_rate = 0.00025 + 0.001 + 0.00002  # Commission + stamp tax + transfer fee
       else:
           cost_rate = 0
-      
+
       gross_return = quantity * price * expected_return
       transaction_cost = quantity * price * cost_rate
       net_return = gross_return - transaction_cost
-      
+
       return {
           "gross_return": gross_return,
           "transaction_cost": transaction_cost,
@@ -281,15 +274,15 @@ The following improvements are planned, ordered by impact and importance within 
 - [ ] **OutputLogger stdout redirect conflicts** — `OutputLogger` stdout redirect can conflict with `@agent_endpoint` decorator's StringIO capture during parallel agent execution — some print statements may be lost. Needs thread-safe logging refactor.
   *Converted from Known Issues, Priority: LOW, Effort: 8-12h*
 
-- [ ] **No decision memory system** — System doesn't learn from past mistakes. TradingAgents-CN uses ChromaDB to store "market situation vectors" and retrieval-augmented generation (RAG) to recall similar historical scenarios, enabling the system to "remember" and avoid repeating errors.
-  *From TradingAgents-CN, Priority: LOW, Effort: 20-30h*
+- [x] **Decision memory system wired into final decision workflow** — `src/tools/memory.py` defines optional ChromaDB-backed `AShareDecisionMemory`; `portfolio_manager.py` best-effort injects similar historical decision memory into the final prompt and stores the validated final decision. `build_outcome_reflection()` and `update_decision_outcome()` now support best-effort outcome updates after realized returns are known. Remaining future refinement: scheduled outcome jobs and performance evaluation of memory retrieval quality.
+  *Completed: 2026-04-26; Future refinement: 6-10h*
   ```python
   from chromadb import Client
   class FinancialMemory:
       def __init__(self):
           self.client = Client()
           self.collection = self.client.create_collection("trading_decisions")
-      
+
       def store(self, situation_features, decision, outcome):
           """Store decision with its outcome for future learning"""
           vector = self.embed(situation_features)  # Convert market situation to vector
@@ -298,13 +291,13 @@ The following improvements are planned, ordered by impact and importance within 
               documents=[json.dumps({"decision": decision, "outcome": outcome})],
               metadatas=[{"date": datetime.now().isoformat(), "return": outcome}]
           )
-      
+
       def recall_similar(self, current_situation, k=5):
           """Retrieve similar historical situations and their outcomes"""
           vector = self.embed(current_situation)
           results = self.collection.query(query_embeddings=[vector], n_results=k)
           return results['metadatas'][0]  # Return k most similar cases
-  
+
   # Usage in portfolio_manager prompt:
   # similar_cases = memory.recall_similar(current_market_features)
   # prompt += f"\n\nLearn from {len(similar_cases)} similar historical cases: {similar_cases}"
@@ -319,7 +312,7 @@ The following improvements are planned, ordered by impact and importance within 
       safe_view = conservative_risk_agent(trading_plan, market_data)
       neutral_view = neutral_risk_agent(trading_plan, market_data)
       return {"risky": risky_view, "safe": safe_view, "neutral": neutral_view}
-  
+
   # Stage 5: Risk judge synthesizes debate into final decision
   def risk_judge_stage(debate_results, historical_memory):
       prompt = f"Synthesize these risk perspectives: {debate_results}"
@@ -361,34 +354,37 @@ Key innovations from [TradingAgents-CN](https://github.com/hsliuping/TradingAgen
 ## Implementation Priority Summary
 
 **Immediate (This Week)** — Fix P0 critical defects affecting accuracy:
-1. ~~Macro analyst data source mismatch~~ (partially done: macro indicators integrated via DSM, but agent still uses stock news for context)
-2. Shenzhen stock financial statements bug
-3. ~~`format_decision()` weight mismatch~~ (SignalWeightingEngine uses consistent weights, display may still show old values)
+1. ~~Macro analyst data source mismatch~~ ✅
+2. ~~Shenzhen stock financial statements bug~~ ✅
+3. ~~`format_decision()` weight mismatch~~ ✅
 4. ~~Missing KDJ indicator~~ ✅
 5. ~~Missing northbound capital flow~~ ✅
 
 **Short Term (Next 2-4 Weeks)** — Fill P1 important gaps:
-6. Valuation model improvements (dynamic WACC, PEG)
-7. Industry-specific thresholds
+6. ~~Valuation model improvements (PEG, comparables, net-debt/EV adjustments)~~ ✅
+7. ~~Industry-specific thresholds, peer percentile helper, and multi-period trend analysis~~ ✅
 8. ~~Anti-scraping protection (curl_cffi)~~ ✅ (core done, tuning remaining)
-9. ~~Persistent caching layer~~ (partially done: DSM with cache for key functions)
-10. Risk management enhancements (CVaR, Beta, stress testing)
+9. ~~Persistent caching layer and symbol cache prewarm~~ (partially done: `SimpleCache` restored, DSM cache injection working, `prewarm_symbol_cache()` added; broader function coverage remains)
+10. ~~Risk management enhancements (CVaR, Beta, liquidity, T+1, stress testing)~~ ✅
+11. ~~Margin trading sentiment data~~ ✅
 
 **Medium Term (1-3 Months)** — P2 architecture improvements:
-11. Decision memory system (ChromaDB)
-12. Multi-period trend analysis
-13. Transaction cost modeling
-14. Multi-role risk debate architecture
+12. ~~Decision memory workflow integration and outcome update helpers~~ ✅
+13. ~~Transaction cost modeling~~ ✅
+14. Broader sentiment platforms (Xueqiu/Snowball, Weibo)
+15. Technical gaps: turnover, support/resistance, MA support, dead-code cleanup
+16. Cross-library fallback hardening and broader DSM coverage
 
 **Long Term (3+ Months)** — Advanced features:
-15. Multi-stock portfolio optimization
-16. Advanced sentiment analysis (Weibo, Xueqiu)
+17. Multi-stock portfolio optimization
+18. Multi-role risk debate architecture
+19. Decision-memory scheduled outcome evaluation
 
 ---
 
-*Last Updated: 2026-04-18*
+*Last Updated: 2026-04-26*
 *Total Optimization Items: 28*
-*Completed: 4 (KDJ, northbound flow, MACD divergence, SignalWeightingEngine)*
-*Partially Completed: 3 (anti-scraping, persistent caching, macro analyst data)*
+*Completed: 17 (KDJ, northbound flow, MACD divergence, SignalWeightingEngine, dynamic WACC, cache restoration, valuation PEG/comparables/net-debt, risk CVaR/liquidity/T+1, final decision memory/fallback, macro evidence scoring/fallback, industry thresholds/peer percentile/trend analysis, margin trading sentiment, symbol cache prewarm, Shenzhen financial statement prefix fix, format_decision weight sync, transaction cost modeling, memory outcome update helpers)*
+*Partially Completed/In Progress: 5 (sentiment breadth, anti-scraping tuning, broader persistent caching coverage, cross-library fallback hardening, technical-analysis cleanup)*
 *From TradingAgents-CN: 11*
-*Estimated Total Effort: 150-200 hours*
+*Estimated Remaining Effort: 90-130 hours*

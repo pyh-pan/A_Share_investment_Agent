@@ -283,6 +283,62 @@ def get_industry_news(industry: str, max_news: int = 20) -> List[Dict[str, Any]]
         return []
 
 
+def get_margin_trading_sentiment(symbol: str) -> Dict[str, Any]:
+    """Get A-share margin trading sentiment with neutral fallback."""
+    neutral = {
+        "margin_change": 0.0,
+        "margin_short_ratio": 0.0,
+        "sentiment": "neutral",
+        "signal": "neutral",
+        "data_available": False,
+    }
+    cache_key = f"margin_trading:{symbol}"
+
+    def _akshare_fetcher():
+        if symbol.startswith(("0", "3")):
+            df = ak.stock_margin_detail_szse(symbol=symbol)
+        else:
+            df = ak.stock_margin_detail_sse(symbol=symbol)
+        if df is None or df.empty or len(df) < 2:
+            return None
+
+        current = df.iloc[0]
+        previous = df.iloc[1]
+        margin_balance = _safe_float(current.get("融资余额"), 0.0) or 0.0
+        prev_margin_balance = _safe_float(previous.get("融资余额"), 0.0) or 0.0
+        short_balance = _safe_float(current.get("融券余额"), 0.0) or 0.0
+        margin_change = margin_balance - prev_margin_balance
+        margin_short_ratio = (
+            margin_balance / short_balance if short_balance > 0 else 9999.0
+        )
+
+        if margin_change > 0 and margin_short_ratio > 10:
+            sentiment, signal = "strong_bullish", "bullish"
+        elif margin_change > 0:
+            sentiment, signal = "bullish", "bullish"
+        elif margin_balance > 0 and margin_change < -0.05 * margin_balance:
+            sentiment, signal = "bearish", "bearish"
+        else:
+            sentiment, signal = "neutral", "neutral"
+
+        return {
+            "margin_change": float(margin_change),
+            "margin_short_ratio": float(margin_short_ratio),
+            "sentiment": sentiment,
+            "signal": signal,
+            "data_available": True,
+        }
+
+    dsm = DataSourceManager()
+    result = dsm.fetch_with_fallback(
+        cache_key=cache_key,
+        fetchers=[_akshare_fetcher],
+        source_names=["akshare"],
+        cache_ttl_hours=4,
+    )
+    return result if result is not None else neutral
+
+
 def calculate_beta(symbol: str, benchmark: str = "000300", period: int = 252) -> float:
     """Compute stock beta versus benchmark index returns."""
     try:
@@ -527,6 +583,9 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
                 "operating_margin": convert_percentage(latest_financial.get("营业利润率(%)", 0)),
                 "market_cap": market_cap,
                 "float_market_cap": float_market_cap,
+                "latest_price": latest_price,
+                "total_shares": market_snapshot.get("total_shares"),
+                "float_shares": market_snapshot.get("float_shares"),
                 "revenue_growth": convert_percentage(latest_financial.get("主营业务收入增长率(%)", 0)),
                 "earnings_growth": convert_percentage(latest_financial.get("净利润增长率(%)", 0)),
                 "book_value_growth": convert_percentage(latest_financial.get("净资产增长率(%)", 0)),
@@ -534,6 +593,7 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
                 "debt_to_equity": convert_percentage(latest_financial.get("资产负债率(%)", 0)),
                 "free_cash_flow_per_share": _safe_float(latest_financial.get("每股经营性现金流(元)")),
                 "earnings_per_share": _safe_float(latest_financial.get("加权每股收益(元)")),
+                "book_value_per_share": book_value_per_share,
                 "pe_ratio": pe_ratio,
                 "price_to_book": price_to_book,
                 "price_to_sales": price_to_sales,
@@ -641,12 +701,24 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
             latest_cash_flow = pd.Series()
             previous_cash_flow = pd.Series()
 
+        def _interest_bearing_debt(row: pd.Series) -> float:
+            debt_fields = [
+                "短期借款",
+                "一年内到期的非流动负债",
+                "长期借款",
+                "应付债券",
+                "租赁负债",
+            ]
+            return sum(float(row.get(field, 0) or 0) for field in debt_fields)
+
         try:
             current_item = {
                 "net_income": float(latest_income.get("净利润", 0)),
                 "operating_revenue": float(latest_income.get("营业总收入", 0)),
                 "operating_profit": float(latest_income.get("营业利润", 0)),
                 "working_capital": float(latest_balance.get("流动资产合计", 0)) - float(latest_balance.get("流动负债合计", 0)),
+                "cash_and_equivalents": float(latest_balance.get("货币资金", 0) or 0),
+                "total_debt": _interest_bearing_debt(latest_balance),
                 "depreciation_and_amortization": float(latest_cash_flow.get("固定资产折旧、油气资产折耗、生产性生物资产折旧", 0)),
                 "capital_expenditure": abs(float(latest_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0))),
                 "free_cash_flow": float(latest_cash_flow.get("经营活动产生的现金流量净额", 0)) - abs(float(latest_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0)))
@@ -656,6 +728,8 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
                 "operating_revenue": float(previous_income.get("营业总收入", 0)),
                 "operating_profit": float(previous_income.get("营业利润", 0)),
                 "working_capital": float(previous_balance.get("流动资产合计", 0)) - float(previous_balance.get("流动负债合计", 0)),
+                "cash_and_equivalents": float(previous_balance.get("货币资金", 0) or 0),
+                "total_debt": _interest_bearing_debt(previous_balance),
                 "depreciation_and_amortization": float(previous_cash_flow.get("固定资产折旧、油气资产折耗、生产性生物资产折旧", 0)),
                 "capital_expenditure": abs(float(previous_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0))),
                 "free_cash_flow": float(previous_cash_flow.get("经营活动产生的现金流量净额", 0)) - abs(float(previous_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0)))
@@ -685,6 +759,8 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         "operating_revenue": 0,
         "operating_profit": 0,
         "working_capital": 0,
+        "cash_and_equivalents": 0,
+        "total_debt": 0,
         "depreciation_and_amortization": 0,
         "capital_expenditure": 0,
         "free_cash_flow": 0
@@ -1004,6 +1080,36 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
             df["date"] = pd.to_datetime(df["date"])
         return df
     return pd.DataFrame()
+
+
+def prewarm_symbol_cache(symbol: str, start_date: str = None, end_date: str = None) -> Dict[str, Dict[str, Any]]:
+    """Best-effort cache prewarm for the main data dependencies of one symbol."""
+    steps = {
+        "price_history": lambda: get_price_history(symbol, start_date, end_date),
+        "financial_metrics": lambda: get_financial_metrics(symbol),
+        "financial_statements": lambda: get_financial_statements(symbol),
+        "market_data": lambda: get_market_data(symbol),
+        "northbound_flow": lambda: get_northbound_flow(),
+        "macro_indicators": lambda: get_macro_indicators(),
+        "margin_trading": lambda: get_margin_trading_sentiment(symbol),
+    }
+    results: Dict[str, Dict[str, Any]] = {}
+    for name, fetcher in steps.items():
+        try:
+            value = fetcher()
+            unavailable = value is None or (
+                hasattr(value, "empty") and bool(getattr(value, "empty"))
+            )
+            results[name] = {
+                "status": "unavailable" if unavailable else "ok",
+                "error": None,
+            }
+        except Exception as exc:
+            results[name] = {
+                "status": "error",
+                "error": str(exc),
+            }
+    return results
 
 
 def prices_to_df(prices):
